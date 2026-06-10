@@ -10,10 +10,39 @@
   <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
   <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
   <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <script type="module">
+    import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
+    import { getAuth, onAuthStateChanged, signInWithEmailAndPassword, signOut }
+      from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
+    import { getFirestore, doc, getDoc, setDoc }
+      from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+
+    const firebaseConfig = {
+      apiKey: "AIzaSyDTFYkn42Ir7LRfBeEENx-DEewXgGhSqrA",
+      authDomain: "jl-guitar.firebaseapp.com",
+      projectId: "jl-guitar",
+      storageBucket: "jl-guitar.firebasestorage.app",
+      messagingSenderId: "293577540543",
+      appId: "1:293577540543:web:00028499b74102e844970a"
+    };
+
+    const app = initializeApp(firebaseConfig);
+    window.fbAuth = getAuth(app);
+    window.fbDb = getFirestore(app);
+    window.fbOnAuthStateChanged = onAuthStateChanged;
+    window.fbSignIn = signInWithEmailAndPassword;
+    window.fbSignOut = signOut;
+    window.fbDoc = doc;
+    window.fbGetDoc = getDoc;
+    window.fbSetDoc = setDoc;
+
+    // Signal that Firebase is ready, then mount React
+    window.dispatchEvent(new Event("firebase-ready"));
+  </script>
 </head>
 <body>
   <div id="root"></div>
-  <script type="text/babel">
+  <script type="text/babel" data-presets="react">
     const { useState, useEffect, useCallback } = React;
 
 // ── Storage helpers ──────────────────────────────────────────────────────────
@@ -26,16 +55,36 @@ const KEYS = {
   settings: "jl_settings",
 };
 
-function load(key, fallback) {
+// Firestore-backed storage. All app data lives in one document: users/{uid}
+let CURRENT_UID = null;
+let DOC_CACHE = {};
+
+async function loadAll(uid) {
+  CURRENT_UID = uid;
   try {
-    const v = localStorage.getItem(key);
-    return v ? JSON.parse(v) : fallback;
-  } catch { return fallback; }
+    const ref = window.fbDoc(window.fbDb, "users", uid);
+    const snap = await window.fbGetDoc(ref);
+    DOC_CACHE = snap.exists() ? snap.data() : {};
+  } catch (e) {
+    console.error("Firestore load error", e);
+    DOC_CACHE = {};
+  }
+  return DOC_CACHE;
 }
 
-function save(key, value) {
-  try { localStorage.setItem(key, JSON.stringify(value)); }
-  catch(e) { console.error("Storage error", e); }
+function load(key, fallback) {
+  const v = DOC_CACHE[key];
+  return (v === undefined || v === null) ? fallback : v;
+}
+
+async function save(key, value) {
+  DOC_CACHE[key] = value;
+  try {
+    const ref = window.fbDoc(window.fbDb, "users", CURRENT_UID);
+    await window.fbSetDoc(ref, { [key]: value }, { merge: true });
+  } catch (e) {
+    console.error("Firestore save error", e);
+  }
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
@@ -305,6 +354,8 @@ const css = `
 
 // ── Main App ──────────────────────────────────────────────────────────────────
 function App() {
+  const [user, setUser] = useState(null);
+  const [authReady, setAuthReady] = useState(false);
   const [tab, setTab] = useState("dashboard");
   const [roster, setRoster] = useState([]);
   const [invoices, setInvoices] = useState([]);
@@ -312,11 +363,11 @@ function App() {
   const [otherIncome, setOtherIncome] = useState([]);
   const [nextInv, setNextInv] = useState(1);
   const [settings, setSettings] = useState({
-    name: "James Lind",
+    name: "",
     business: "James Lind Guitar",
     email: "",
     phone: "",
-    accountName: "James Lind",
+    accountName: "",
     sortCode: "XX-XX-XX",
     accountNo: "XXXXXXXX",
     schoolRate: 45,
@@ -324,7 +375,9 @@ function App() {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    (() => {
+    if (!user) return;
+    (async () => {
+      await loadAll(user.uid);
       const r = load(KEYS.roster, []);
       const i = load(KEYS.invoices, []);
       const e = load(KEYS.expenses, []);
@@ -366,7 +419,7 @@ function App() {
         { id: 31, type: "private", firstName: "Aksel Eliassen",    email: "grete_eliassen@yahoo.se",           address1: "", city: "", rate: 35,  duration: "30 min", payment: "Invoice", notes: "" },
         { id: 32, type: "private", firstName: "Joseph Murphy",     email: "josephmaximmurphy@hotmail.com",     address1: "", city: "", rate: 30,  duration: "30 min", payment: "Invoice", notes: "" },
       ];
-      if (r.length === 0) save(KEYS.roster, seededRoster);
+      if (r.length === 0) await save(KEYS.roster, seededRoster);
       setRoster(seededRoster);
       setInvoices(i);
       setExpenses(e);
@@ -375,19 +428,42 @@ function App() {
       if (s) setSettings(s);
       setLoading(false);
     })();
+  }, [user]);
+
+  useEffect(() => {
+    const unsub = window.fbOnAuthStateChanged(window.fbAuth, (u) => {
+      setUser(u);
+      setAuthReady(true);
+      if (!u) setLoading(false);
+    });
+    return () => unsub();
   }, []);
 
-  const persistRoster = useCallback((v) => { setRoster(v); save(KEYS.roster, v); }, []);
-  const persistInvoices = useCallback((v) => { setInvoices(v); save(KEYS.invoices, v); }, []);
-  const persistExpenses = useCallback((v) => { setExpenses(v); save(KEYS.expenses, v); }, []);
-  const persistOtherIncome = useCallback((v) => { setOtherIncome(v); save(KEYS.income, v); }, []);
-  const persistNextInv = useCallback((v) => { setNextInv(v); save(KEYS.nextInv, v); }, []);
-  const persistSettings = useCallback((v) => { setSettings(v); save(KEYS.settings, v); }, []);
+  const persistRoster = useCallback(async (v) => { setRoster(v); await save(KEYS.roster, v); }, []);
+  const persistInvoices = useCallback(async (v) => { setInvoices(v); await save(KEYS.invoices, v); }, []);
+  const persistExpenses = useCallback(async (v) => { setExpenses(v); await save(KEYS.expenses, v); }, []);
+  const persistOtherIncome = useCallback(async (v) => { setOtherIncome(v); await save(KEYS.income, v); }, []);
+  const persistNextInv = useCallback(async (v) => { setNextInv(v); await save(KEYS.nextInv, v); }, []);
+  const persistSettings = useCallback(async (v) => { setSettings(v); await save(KEYS.settings, v); }, []);
+
+  if (!authReady) return (
+    <>
+      <style>{css}</style>
+      <div className="app"><div className="empty">Loading…</div></div>
+    </>
+  );
+
+  if (!user) return (
+    <>
+      <style>{css}</style>
+      <LoginScreen />
+    </>
+  );
 
   if (loading) return (
     <>
       <style>{css}</style>
-      <div className="app"><div className="empty">Loading…</div></div>
+      <div className="app"><div className="empty">Loading your data…</div></div>
     </>
   );
 
@@ -400,6 +476,8 @@ function App() {
         <div className="header">
           <span className="header-title">James Lind Guitar</span>
           <span className="header-sub">Tuition management</span>
+          <span className="spacer" style={{flex:1}} />
+          <button className="btn btn-ghost btn-sm" onClick={() => window.fbSignOut(window.fbAuth)}>Sign out</button>
         </div>
         <nav className="nav">
           {[["dashboard","Dashboard"],["roster","Roster"],["invoice","New Invoice"],["log","Invoice Log"],["expenses","Income & Expenses"],["settings","Settings"]].map(([k,l]) => (
@@ -740,8 +818,8 @@ function NewInvoice({ roster, invoices, nextInv, settings, persistInvoices, pers
     // Save to log with status "sent"
     const saved = { ...inv, status: "sent" };
     const updated = [...invoices, saved];
-    persistInvoices(updated);
-    persistNextInv(nextInv + 1);
+    await persistInvoices(updated);
+    await persistNextInv(nextInv + 1);
     setSent(true);
     setPreview(saved);
   }
@@ -823,8 +901,8 @@ function NewInvoice({ roster, invoices, nextInv, settings, persistInvoices, pers
               downloadInvoice(preview, settings);
               if (!sent) {
                 const saved = { ...preview, status: "sent" };
-                persistInvoices([...invoices, saved]);
-                persistNextInv(nextInv + 1);
+                await persistInvoices([...invoices, saved]);
+                await persistNextInv(nextInv + 1);
                 setSent(true);
                 setPreview(saved);
               }
@@ -900,15 +978,15 @@ function InvoicePreview({ inv, settings }) {
 
 // ── Invoice Log ───────────────────────────────────────────────────────────────
 function InvoiceLog({ invoices, persistInvoices }) {
-  const sorted = [...invoices].sort((a, b) => b.date.localeCompare(a.date));
+  const sorted = [...invoices].filter(i => !i.manual).sort((a, b) => b.date.localeCompare(a.date));
 
   async function markPaid(id) {
     const updated = invoices.map(i => i.id === id ? { ...i, status: "paid", paidDate: today() } : i);
-    persistInvoices(updated);
+    await persistInvoices(updated);
   }
 
   async function del(id) {
-    persistInvoices(invoices.filter(i => i.id !== id));
+    await persistInvoices(invoices.filter(i => i.id !== id));
   }
 
   if (sorted.length === 0) return <div className="empty">No invoices yet.</div>;
@@ -946,34 +1024,72 @@ function InvoiceLog({ invoices, persistInvoices }) {
 }
 
 // ── Expenses ──────────────────────────────────────────────────────────────────
-function ExpensesPage({ expenses, invoices, otherIncome, persistExpenses, persistOtherIncome }) {
-  const [subTab, setSubTab] = useState("income");
+function ExpensesPage({ expenses, invoices, otherIncome, roster, persistExpenses, persistOtherIncome, persistInvoices }) {
+  const [subTab, setSubTab] = useState("payments");
   const [form, setForm] = useState({ date: today(), description: "", category: "Strings & consumables", supplier: "", amount: "", receipt: false, notes: "" });
   const [incForm, setIncForm] = useState({ date: today(), source: "Performance", description: "", payer: "", amount: "", notes: "" });
+  const [payForm, setPayForm] = useState({ date: today(), type: "school", studentId: "", clientName: "", amount: "", notes: "" });
 
   const CATS = ["Strings & consumables","Sheet music / scores","Equipment","Travel","Professional development","Software / subscriptions","Marketing","Insurance","Other"];
   const SOURCES = ["Performance","Substack","Other"];
 
+  // Manually-logged payments are stored as invoices with status "paid" and a manual flag,
+  // so they flow through every total identically to invoiced-then-paid income.
+  const payStudents = roster.filter(s => s.type === payForm.type);
+
+  async function addPayment() {
+    if (!payForm.amount || (!payForm.studentId && !payForm.clientName)) return;
+    const student = roster.find(s => s.id === Number(payForm.studentId));
+    const name = student
+      ? (payForm.type === "school" ? `${student.firstName} ${student.surname}` : (student.organisation || student.firstName))
+      : payForm.clientName;
+    const rec = {
+      id: Date.now(),
+      number: "—",
+      type: payForm.type,
+      clientName: name,
+      clientEmail: student?.email || "",
+      studentName: name,
+      description: payForm.notes || `${payForm.type.charAt(0).toUpperCase() + payForm.type.slice(1)} payment — ${name}`,
+      qty: 1,
+      rate: Number(payForm.amount),
+      amount: Number(payForm.amount),
+      date: payForm.date,
+      due: payForm.date,
+      term: "",
+      status: "paid",
+      paidDate: payForm.date,
+      manual: true,
+    };
+    await persistInvoices([...invoices, rec]);
+    setPayForm({ date: today(), type: payForm.type, studentId: "", clientName: "", amount: "", notes: "" });
+  }
+
+  async function delPayment(id) {
+    await persistInvoices(invoices.filter(i => i.id !== id));
+  }
+
+
   async function addExpense() {
     if (!form.description || !form.amount) return;
     const updated = [...expenses, { ...form, id: Date.now(), amount: Number(form.amount) }];
-    persistExpenses(updated);
+    await persistExpenses(updated);
     setForm({ date: today(), description: "", category: "Strings & consumables", supplier: "", amount: "", receipt: false, notes: "" });
   }
 
   async function delExpense(id) {
-    persistExpenses(expenses.filter(e => e.id !== id));
+    await persistExpenses(expenses.filter(e => e.id !== id));
   }
 
   async function addIncome() {
     if (!incForm.description || !incForm.amount) return;
     const updated = [...otherIncome, { ...incForm, id: Date.now(), amount: Number(incForm.amount) }];
-    persistOtherIncome(updated);
+    await persistOtherIncome(updated);
     setIncForm({ date: today(), source: "Performance", description: "", payer: "", amount: "", notes: "" });
   }
 
   async function delIncome(id) {
-    persistOtherIncome(otherIncome.filter(e => e.id !== id));
+    await persistOtherIncome(otherIncome.filter(e => e.id !== id));
   }
 
   const invoiceIncome = invoices.filter(i => i.status === "paid").reduce((a, i) => a + i.amount, 0);
@@ -981,21 +1097,100 @@ function ExpensesPage({ expenses, invoices, otherIncome, persistExpenses, persis
   const totalIncome = invoiceIncome + extraIncome;
   const totalExp = expenses.reduce((a, e) => a + e.amount, 0);
 
-  // Monthly summary
-  const months = ["Sep","Oct","Nov","Dec","Jan","Feb","Mar","Apr","May","Jun","Jul","Aug"];
-  const years = { "Sep":2025,"Oct":2025,"Nov":2025,"Dec":2025,"Jan":2026,"Feb":2026,"Mar":2026,"Apr":2026,"May":2026,"Jun":2026,"Jul":2026,"Aug":2026 };
+  // Tax year runs 6 April – 5 April. Months ordered Apr → Mar.
+  const taxMonths = [
+    { label: "Apr", m: "04", yOff: 0 }, { label: "May", m: "05", yOff: 0 }, { label: "Jun", m: "06", yOff: 0 },
+    { label: "Jul", m: "07", yOff: 0 }, { label: "Aug", m: "08", yOff: 0 }, { label: "Sep", m: "09", yOff: 0 },
+    { label: "Oct", m: "10", yOff: 0 }, { label: "Nov", m: "11", yOff: 0 }, { label: "Dec", m: "12", yOff: 0 },
+    { label: "Jan", m: "01", yOff: 1 }, { label: "Feb", m: "02", yOff: 1 }, { label: "Mar", m: "03", yOff: 1 },
+  ];
+  const [taxYearStart, setTaxYearStart] = useState(2025); // 2025 means 2025/26
+  const taxYears = [2023, 2024, 2025, 2026];
 
-  function monthIncome(m, y) {
-    return invoices.filter(i => i.status === "paid" && i.date.startsWith(`${y}-${String(Object.keys(years).indexOf(m)+9>12?Object.keys(years).indexOf(m)-3:Object.keys(years).indexOf(m)+9).padStart(2,"0")}`)).reduce((a,i) => a+i.amount, 0);
+  // All paid income (invoiced + manually logged) plus other income, within a tax year
+  function inTaxYear(dateStr, startYear) {
+    if (!dateStr) return false;
+    const d = new Date(dateStr);
+    const start = new Date(`${startYear}-04-06`);
+    const end = new Date(`${startYear + 1}-04-05T23:59:59`);
+    return d >= start && d <= end;
   }
+
+  const tyInvoiceIncome = invoices.filter(i => i.status === "paid" && inTaxYear(i.date, taxYearStart)).reduce((a,i) => a+i.amount, 0);
+  const tyOtherIncome = otherIncome.filter(i => inTaxYear(i.date, taxYearStart)).reduce((a,i) => a+i.amount, 0);
+  const tyIncome = tyInvoiceIncome + tyOtherIncome;
+  const tyExpenses = expenses.filter(e => inTaxYear(e.date, taxYearStart)).reduce((a,e) => a+e.amount, 0);
+
+  // Income by stream within the tax year (for self-assessment categorisation)
+  const tyStreams = [
+    ["School teaching", invoices.filter(i => i.status === "paid" && i.type === "school" && inTaxYear(i.date, taxYearStart)).reduce((a,i)=>a+i.amount,0)],
+    ["Private teaching", invoices.filter(i => i.status === "paid" && i.type === "private" && inTaxYear(i.date, taxYearStart)).reduce((a,i)=>a+i.amount,0)],
+    ["Performances", invoices.filter(i => i.status === "paid" && i.type === "performance" && inTaxYear(i.date, taxYearStart)).reduce((a,i)=>a+i.amount,0) + otherIncome.filter(i => i.source === "Performance" && inTaxYear(i.date, taxYearStart)).reduce((a,i)=>a+i.amount,0)],
+    ["Substack", otherIncome.filter(i => i.source === "Substack" && inTaxYear(i.date, taxYearStart)).reduce((a,i)=>a+i.amount,0)],
+    ["Other", otherIncome.filter(i => i.source === "Other" && inTaxYear(i.date, taxYearStart)).reduce((a,i)=>a+i.amount,0)],
+  ];
 
   return (
     <>
       <div className="tabs">
+        <button className={`tab${subTab==="payments"?" active":""}`} onClick={() => setSubTab("payments")}>Log Payment</button>
         <button className={`tab${subTab==="income"?" active":""}`} onClick={() => setSubTab("income")}>Other Income</button>
         <button className={`tab${subTab==="expenses"?" active":""}`} onClick={() => setSubTab("expenses")}>Expenses</button>
         <button className={`tab${subTab==="summary"?" active":""}`} onClick={() => setSubTab("summary")}>Summary</button>
       </div>
+
+      {subTab === "payments" && (
+        <>
+          <div className="panel">
+            <div className="panel-title">Log a received payment</div>
+            <p className="text-muted" style={{fontSize:13, marginBottom:16}}>Record money already received — including from earlier in the tax year — without issuing an invoice. These flow into your totals and tax-year summary exactly like paid invoices.</p>
+            <div className="grid-3">
+              <div className="field"><label>Date received</label><input type="date" value={payForm.date} onChange={e => setPayForm({...payForm, date:e.target.value})} /></div>
+              <div className="field"><label>Stream</label>
+                <select value={payForm.type} onChange={e => setPayForm({...payForm, type:e.target.value, studentId:"", clientName:""})}>
+                  <option value="school">School</option>
+                  <option value="private">Private</option>
+                  <option value="performance">Performance</option>
+                </select>
+              </div>
+              <div className="field"><label>Amount (£)</label><input type="number" value={payForm.amount} onChange={e => setPayForm({...payForm, amount:e.target.value})} /></div>
+            </div>
+            <div className="grid-2">
+              <div className="field"><label>Student / client from roster</label>
+                <select value={payForm.studentId} onChange={e => setPayForm({...payForm, studentId:e.target.value, clientName:""})}>
+                  <option value="">— select or use free text below —</option>
+                  {payStudents.map(s => (
+                    <option key={s.id} value={s.id}>{payForm.type === "school" ? `${s.firstName} ${s.surname}` : (s.organisation || s.firstName)}</option>
+                  ))}
+                </select>
+              </div>
+              <div className="field"><label>Or one-off name</label><input value={payForm.clientName} onChange={e => setPayForm({...payForm, clientName:e.target.value, studentId:""})} placeholder="e.g. former student, ad-hoc gig" /></div>
+            </div>
+            <div className="field"><label>Note (optional)</label><input value={payForm.notes} onChange={e => setPayForm({...payForm, notes:e.target.value})} placeholder="e.g. Spring term 2025, paid by cash" /></div>
+            <button className="btn btn-primary" onClick={addPayment}>Log payment</button>
+          </div>
+
+          <div className="table-wrap">
+            {invoices.filter(i => i.manual).length === 0 ? <div className="empty">No manually-logged payments yet.</div> : (
+              <table>
+                <thead><tr><th>Date</th><th>Stream</th><th>From</th><th>Amount</th><th>Note</th><th></th></tr></thead>
+                <tbody>
+                  {[...invoices].filter(i => i.manual).sort((a,b) => b.date.localeCompare(a.date)).map(p => (
+                    <tr key={p.id}>
+                      <td className="text-muted">{fmtDate(p.date)}</td>
+                      <td className="text-muted" style={{textTransform:"capitalize"}}>{p.type}</td>
+                      <td>{p.clientName}</td>
+                      <td className="text-success">{fmtGBP(p.amount)}</td>
+                      <td className="text-muted" style={{maxWidth:200, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap"}}>{p.description}</td>
+                      <td><button className="btn btn-danger btn-sm" onClick={() => delPayment(p.id)}>×</button></td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+          </div>
+        </>
+      )}
 
       {subTab === "income" && (
         <>
@@ -1084,27 +1279,54 @@ function ExpensesPage({ expenses, invoices, otherIncome, persistExpenses, persis
 
       {subTab === "summary" && (
         <>
-          <div className="stats">
-            <div className="stat"><div className="stat-val">{fmtGBP(totalIncome)}</div><div className="stat-label">Total income</div></div>
-            <div className="stat"><div className="stat-val">{fmtGBP(totalExp)}</div><div className="stat-label">Total expenses</div></div>
-            <div className="stat"><div className="stat-val">{fmtGBP(totalIncome - totalExp)}</div><div className="stat-label">Net profit</div></div>
+          <div className="row" style={{marginBottom:16}}>
+            <div className="field" style={{maxWidth:220, marginBottom:0}}>
+              <label>Tax year</label>
+              <select value={taxYearStart} onChange={e => setTaxYearStart(Number(e.target.value))}>
+                {taxYears.map(y => <option key={y} value={y}>6 Apr {y} – 5 Apr {y+1}  ({y}/{String(y+1).slice(2)})</option>)}
+              </select>
+            </div>
           </div>
+
+          <div className="stats">
+            <div className="stat"><div className="stat-val">{fmtGBP(tyIncome)}</div><div className="stat-label">Income this tax year</div></div>
+            <div className="stat"><div className="stat-val">{fmtGBP(tyExpenses)}</div><div className="stat-label">Expenses this tax year</div></div>
+            <div className="stat"><div className="stat-val">{fmtGBP(tyIncome - tyExpenses)}</div><div className="stat-label">Net profit (taxable)</div></div>
+          </div>
+
           <div className="panel">
-            <div className="panel-title">2025/26 monthly breakdown</div>
+            <div className="panel-title">Income by stream — {taxYearStart}/{String(taxYearStart+1).slice(2)}</div>
+            <p className="text-muted" style={{fontSize:12, marginBottom:12}}>This is your gross self-employment income for the year. Check whether your St Margaret's work is paid via PAYE — if so, it sits outside self-employment income for tax purposes.</p>
+            {tyStreams.map(([label, val]) => (
+              <div key={label} className="row" style={{padding:"6px 0", borderBottom:`1px solid ${C.border}`}}>
+                <span className="text-muted" style={{fontSize:13}}>{label}</span>
+                <span className="spacer" />
+                <span style={{fontFamily:"'Cormorant Garamond', serif", fontSize:16}} className={val > 0 ? "" : "text-muted"}>{val > 0 ? fmtGBP(val) : "—"}</span>
+              </div>
+            ))}
+            <div className="row" style={{padding:"10px 0 0", fontWeight:500}}>
+              <span style={{fontSize:13}}>Gross income</span>
+              <span className="spacer" />
+              <span style={{fontFamily:"'Cormorant Garamond', serif", fontSize:18}} className="text-accent">{fmtGBP(tyIncome)}</span>
+            </div>
+          </div>
+
+          <div className="panel">
+            <div className="panel-title">Monthly breakdown — {taxYearStart}/{String(taxYearStart+1).slice(2)}</div>
             <div className="table-wrap">
               <table>
                 <thead><tr><th>Month</th><th>Income</th><th>Expenses</th><th>Net</th></tr></thead>
                 <tbody>
-                  {months.map((m, idx) => {
-                    const y = years[m];
-                    const mNum = String(idx < 4 ? idx + 9 : idx - 3).padStart(2, "0");
-                    const inc = invoices.filter(i => i.status === "paid" && i.date.startsWith(`${y}-${mNum}`)).reduce((a,i) => a+i.amount, 0)
-                      + otherIncome.filter(i => i.date.startsWith(`${y}-${mNum}`)).reduce((a,i) => a+i.amount, 0);
-                    const exp = expenses.filter(e => e.date.startsWith(`${y}-${mNum}`)).reduce((a,e) => a+e.amount, 0);
+                  {taxMonths.map(({label, m, yOff}) => {
+                    const y = taxYearStart + yOff;
+                    const prefix = `${y}-${m}`;
+                    const inc = invoices.filter(i => i.status === "paid" && i.date.startsWith(prefix)).reduce((a,i) => a+i.amount, 0)
+                      + otherIncome.filter(i => i.date.startsWith(prefix)).reduce((a,i) => a+i.amount, 0);
+                    const exp = expenses.filter(e => e.date.startsWith(prefix)).reduce((a,e) => a+e.amount, 0);
                     const net = inc - exp;
                     return (
-                      <tr key={m}>
-                        <td>{m} {y}</td>
+                      <tr key={label}>
+                        <td>{label} {y}</td>
                         <td className="text-success">{inc > 0 ? fmtGBP(inc) : <span className="text-muted">—</span>}</td>
                         <td className="text-danger">{exp > 0 ? fmtGBP(exp) : <span className="text-muted">—</span>}</td>
                         <td className={net > 0 ? "text-success" : net < 0 ? "text-danger" : "text-muted"}>{net !== 0 ? fmtGBP(net) : "—"}</td>
@@ -1115,8 +1337,33 @@ function ExpensesPage({ expenses, invoices, otherIncome, persistExpenses, persis
               </table>
             </div>
           </div>
+
+          <div className="panel">
+            <div className="panel-title">Expenses by category — {taxYearStart}/{String(taxYearStart+1).slice(2)}</div>
+            <div className="table-wrap">
+              <table>
+                <thead><tr><th>Category</th><th>Total</th></tr></thead>
+                <tbody>
+                  {CATS.map(cat => {
+                    const total = expenses.filter(e => e.category === cat && inTaxYear(e.date, taxYearStart)).reduce((a,e) => a+e.amount, 0);
+                    if (total === 0) return null;
+                    return (
+                      <tr key={cat}>
+                        <td className="text-muted">{cat}</td>
+                        <td className="text-danger">{fmtGBP(total)}</td>
+                      </tr>
+                    );
+                  })}
+                  {expenses.filter(e => inTaxYear(e.date, taxYearStart)).length === 0 && (
+                    <tr><td colSpan={2} className="text-muted" style={{textAlign:"center", padding:"20px"}}>No expenses recorded for this tax year.</td></tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </div>
         </>
       )}
+
     </>
   );
 }
@@ -1145,17 +1392,17 @@ function importData(file, persistRoster, persistInvoices, persistExpenses, persi
   reader.onload = async (e) => {
     try {
       const data = JSON.parse(e.target.result);
-      if (data.roster) persistRoster(data.roster);
-      if (data.invoices) persistInvoices(data.invoices);
-      if (data.expenses) persistExpenses(data.expenses);
-      if (data.otherIncome) persistOtherIncome(data.otherIncome);
-      if (data.settings) persistSettings(data.settings);
+      if (data.roster) await persistRoster(data.roster);
+      if (data.invoices) await persistInvoices(data.invoices);
+      if (data.expenses) await persistExpenses(data.expenses);
+      if (data.otherIncome) await persistOtherIncome(data.otherIncome);
+      if (data.settings) await persistSettings(data.settings);
       if (data.invoices && data.invoices.length > 0) {
         const maxInv = data.invoices.reduce((max, inv) => {
           const n = parseInt(inv.number.replace('INV-', ''));
           return n > max ? n : max;
         }, 0);
-        persistNextInv(maxInv + 1);
+        await persistNextInv(maxInv + 1);
       }
       setMsg('✓ Data restored successfully');
     } catch {
@@ -1217,8 +1464,49 @@ function StatusBadge({ status }) {
 }
 
 
-    const root = ReactDOM.createRoot(document.getElementById('root'));
-    root.render(<App />);
+// ── Login Screen ──────────────────────────────────────────────────────────────
+function LoginScreen() {
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [err, setErr] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  async function signIn() {
+    setErr(""); setBusy(true);
+    try {
+      await window.fbSignIn(window.fbAuth, email.trim(), password);
+    } catch (e) {
+      setErr("Sign-in failed. Check your email and password.");
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="app" style={{maxWidth:380, paddingTop:80}}>
+      <div className="header" style={{justifyContent:"center", borderBottom:"none"}}>
+        <span className="header-title">James Lind Guitar</span>
+      </div>
+      <div className="panel">
+        <div className="panel-title">Sign in</div>
+        <div className="field"><label>Email</label><input type="email" value={email} onChange={e => setEmail(e.target.value)} onKeyDown={e => e.key==="Enter" && signIn()} /></div>
+        <div className="field"><label>Password</label><input type="password" value={password} onChange={e => setPassword(e.target.value)} onKeyDown={e => e.key==="Enter" && signIn()} /></div>
+        {err && <p className="text-danger" style={{fontSize:13, marginBottom:12}}>{err}</p>}
+        <button className="btn btn-primary" onClick={signIn} disabled={busy}>{busy ? "Signing in…" : "Sign in"}</button>
+      </div>
+    </div>
+  );
+}
+
+    function mount() {
+      const root = ReactDOM.createRoot(document.getElementById('root'));
+      root.render(<App />);
+    }
+    // Wait for Firebase module to finish loading before mounting
+    if (window.fbAuth) {
+      mount();
+    } else {
+      window.addEventListener("firebase-ready", mount, { once: true });
+    }
   </script>
 </body>
 </html>
