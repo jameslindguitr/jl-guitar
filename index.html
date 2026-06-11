@@ -1,0 +1,1532 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="JL Guitar">
+  <title>James Lind Guitar</title>
+  <script crossorigin src="https://cdnjs.cloudflare.com/ajax/libs/react/18.3.1/umd/react.production.min.js"></script>
+  <script crossorigin src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.3.1/umd/react-dom.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.24.7/babel.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/jspdf@2.5.1/dist/jspdf.umd.min.js"></script>
+  <script type="module">
+    import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
+    import { getAuth, onAuthStateChanged, signInWithEmailAndPassword, signOut } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
+    import { getFirestore, doc, getDoc, setDoc } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+    const firebaseConfig = {
+      apiKey: "AIzaSyDTFYkn42Ir7LRfBeEENx-DEewXgGhSqrA",
+      authDomain: "jl-guitar.firebaseapp.com",
+      projectId: "jl-guitar",
+      storageBucket: "jl-guitar.firebasestorage.app",
+      messagingSenderId: "293577540543",
+      appId: "1:293577540543:web:00028499b74102e844970a"
+    };
+    const fbApp = initializeApp(firebaseConfig);
+    window.fbAuth = getAuth(fbApp);
+    window.fbDb = getFirestore(fbApp);
+    window.fbOnAuthStateChanged = onAuthStateChanged;
+    window.fbSignIn = signInWithEmailAndPassword;
+    window.fbSignOut = signOut;
+    window.fbDoc = doc; window.fbGetDoc = getDoc; window.fbSetDoc = setDoc;
+  </script>
+</head>
+<body>
+  <div id="root"></div>
+  <script type="text/babel" data-presets="react">
+    const { useState, useEffect, useCallback } = React;
+
+// ── Storage helpers ──────────────────────────────────────────────────────────
+const KEYS = {
+  roster: "jl_roster",
+  invoices: "jl_invoice_log",
+  expenses: "jl_expenses",
+  income: "jl_other_income",
+  nextInv: "jl_next_inv",
+  settings: "jl_settings",
+};
+
+let CURRENT_UID = null;
+let DOC_CACHE = {};
+function sanitise(value) { return JSON.parse(JSON.stringify(value === undefined ? null : value)); }
+async function loadAll(uid) {
+  CURRENT_UID = uid;
+  try {
+    const ref = window.fbDoc(window.fbDb, "users", uid);
+    const snap = await window.fbGetDoc(ref);
+    DOC_CACHE = snap.exists() ? snap.data() : {};
+  } catch (e) { console.error("Firestore load error", e); DOC_CACHE = {}; }
+  return DOC_CACHE;
+}
+function load(key, fallback) {
+  const v = DOC_CACHE[key];
+  return (v === undefined || v === null) ? fallback : v;
+}
+async function save(key, value) {
+  const clean = sanitise(value);
+  DOC_CACHE[key] = clean;
+  try {
+    const ref = window.fbDoc(window.fbDb, "users", CURRENT_UID);
+    await window.fbSetDoc(ref, { [key]: clean }, { merge: true });
+  } catch (e) { console.error("Firestore save error", e); alert("Could not save to the cloud: " + e.message); }
+}
+
+// ── Helpers ──────────────────────────────────────────────────────────────────
+function today() {
+  return new Date().toISOString().slice(0, 10);
+}
+
+function fmtDate(iso) {
+  if (!iso) return "";
+  const [y, m, d] = iso.split("-");
+  return `${d}/${m}/${y}`;
+}
+
+function fmtGBP(n) {
+  return `£${Number(n || 0).toFixed(2)}`;
+}
+
+function nextInvNum(n) {
+  return `INV-${String(n).padStart(3, "0")}`;
+}
+
+function dueDate(iso) {
+  const d = new Date(iso);
+  d.setDate(d.getDate() + 14);
+  return d.toISOString().slice(0, 10);
+}
+
+// ── Invoice PDF-style content (plain text for mailto body) ───────────────────
+function downloadInvoice(inv, settings) {
+  const fileName = `${inv.number}-${inv.clientName.replace(/\s+/g, '-')}.pdf`;
+
+  // jsPDF is bundled inside html2pdf; grab the constructor either way.
+  const JsPDF = (window.jspdf && window.jspdf.jsPDF) || window.jsPDF;
+  if (!JsPDF) {
+    alert("PDF library not loaded. Please refresh and try again.");
+    return;
+  }
+
+  const doc = new JsPDF({ unit: "mm", format: "a4", orientation: "portrait" });
+  const pageW = 210;
+  const M = 20;            // margin
+  const right = pageW - M; // right edge
+  let y = M + 4;
+
+  const gbp = (n) => "\u00A3" + Number(n).toFixed(2);
+
+  // ── Header ──
+  doc.setFont("helvetica", "bold");
+  doc.setFontSize(16);
+  doc.setTextColor(26, 26, 24);
+  doc.text(settings.business || "James Lind Guitar", M, y);
+
+  doc.setFont("helvetica", "normal");
+  doc.setFontSize(22);
+  doc.text("INVOICE", right, y, { align: "right" });
+
+  y += 6;
+  doc.setFontSize(9);
+  doc.setTextColor(110, 110, 110);
+  const contact = [settings.email, settings.phone].filter(Boolean).join("   ");
+  if (contact) doc.text(contact, M, y);
+
+  doc.setTextColor(26, 26, 24);
+  doc.setFontSize(10);
+  doc.setFont("helvetica", "bold");
+  doc.text(inv.number, right, y, { align: "right" });
+  y += 5;
+  doc.setFont("helvetica", "normal");
+  doc.setFontSize(9);
+  doc.setTextColor(110, 110, 110);
+  doc.text(fmtDate(inv.date), right, y, { align: "right" });
+  y += 4;
+  doc.text("Due " + fmtDate(inv.due), right, y, { align: "right" });
+
+  // ── Divider ──
+  y += 8;
+  doc.setDrawColor(221, 221, 221);
+  doc.line(M, y, right, y);
+  y += 10;
+
+  // ── Bill to ──
+  doc.setFontSize(8);
+  doc.setTextColor(150, 150, 150);
+  doc.text("BILL TO", M, y);
+  if (inv.term) doc.text("TERM", M + 90, y);
+  y += 5;
+  doc.setFontSize(11);
+  doc.setTextColor(26, 26, 24);
+  doc.text(inv.clientName || "", M, y);
+  if (inv.term) doc.text(inv.term, M + 90, y);
+  if (inv.clientEmail) {
+    y += 5;
+    doc.setFontSize(9);
+    doc.setTextColor(150, 150, 150);
+    doc.text(inv.clientEmail, M, y);
+  }
+
+  // ── Line items table ──
+  y += 12;
+  const colQty = right - 90;
+  const colRate = right - 55;
+  doc.setFontSize(8);
+  doc.setTextColor(150, 150, 150);
+  doc.text("DESCRIPTION", M, y);
+  doc.text("QTY", colQty, y, { align: "right" });
+  doc.text("RATE", colRate, y, { align: "right" });
+  doc.text("AMOUNT", right, y, { align: "right" });
+  y += 3;
+  doc.setDrawColor(221, 221, 221);
+  doc.line(M, y, right, y);
+  y += 7;
+
+  doc.setFontSize(10);
+  doc.setTextColor(26, 26, 24);
+  const descLines = doc.splitTextToSize(inv.description || "", 90);
+  doc.text(descLines, M, y);
+  doc.text(String(inv.qty), colQty, y, { align: "right" });
+  doc.text(gbp(inv.rate), colRate, y, { align: "right" });
+  doc.text(gbp(inv.amount), right, y, { align: "right" });
+  y += Math.max(7, descLines.length * 5);
+  doc.setDrawColor(235, 235, 235);
+  doc.line(M, y, right, y);
+
+  // ── Total ──
+  y += 9;
+  doc.setFont("helvetica", "bold");
+  doc.setFontSize(12);
+  doc.setTextColor(150, 150, 150);
+  doc.text("Total due", colRate, y, { align: "right" });
+  doc.setTextColor(26, 26, 24);
+  doc.text(gbp(inv.amount), right, y, { align: "right" });
+
+  // ── Payment details box ──
+  y += 16;
+  doc.setFillColor(245, 245, 240);
+  const boxH = 26;
+  doc.rect(M, y, right - M, boxH, "F");
+  doc.setFont("helvetica", "bold");
+  doc.setFontSize(9);
+  doc.setTextColor(26, 26, 24);
+  doc.text("Payment details", M + 5, y + 7);
+  doc.setFont("helvetica", "normal");
+  doc.setFontSize(9);
+  doc.setTextColor(85, 85, 85);
+  doc.text("Account name: " + (settings.accountName || ""), M + 5, y + 13);
+  doc.text("Sort code: " + (settings.sortCode || "") + "    Account no: " + (settings.accountNo || ""), M + 5, y + 18);
+  doc.text("Reference: " + inv.number + " - " + inv.clientName, M + 5, y + 23);
+
+  doc.save(fileName);
+}
+
+function buildInvoiceText(inv, settings) {
+  const lines = [
+    `INVOICE`,
+    ``,
+    `From: ${settings.name}`,
+    `      ${settings.email}  ·  ${settings.phone}`,
+    ``,
+    `Invoice No: ${inv.number}`,
+    `Date:       ${fmtDate(inv.date)}`,
+    `Due:        ${fmtDate(inv.due)}`,
+    ``,
+    `Bill To: ${inv.clientName}`,
+    inv.clientEmail ? `         ${inv.clientEmail}` : "",
+    ``,
+    `Description: ${inv.description}`,
+    ``,
+    `  ${inv.qty} × lesson${inv.qty > 1 ? "s" : ""} @ ${fmtGBP(inv.rate)}`,
+    ``,
+    `TOTAL DUE: ${fmtGBP(inv.amount)}`,
+    ``,
+    `─────────────────────────────`,
+    `Payment details`,
+    `Account name: ${settings.accountName}`,
+    `Sort code:    ${settings.sortCode}`,
+    `Account no:   ${settings.accountNo}`,
+    `Reference:    ${inv.number} — ${inv.clientName}`,
+    ``,
+    `Please use the reference above so your payment can be identified.`,
+    `Thank you.`,
+  ].filter((l) => l !== null);
+  return lines.join("\n");
+}
+
+// ── Colour tokens ─────────────────────────────────────────────────────────────
+// Dark slate base, warm parchment text, amber accent — a working document
+// aesthetic that fits handcrafted music teaching rather than startup tech.
+const C = {
+  bg: "#13120F",
+  surface: "#1C1B17",
+  raised: "#252420",
+  border: "#2E2C27",
+  accent: "#C8973A",
+  accentDim: "#8A6520",
+  text: "#E8E2D5",
+  muted: "#7A7568",
+  danger: "#B85050",
+  success: "#5A9E6F",
+};
+
+const css = `
+  @import url('https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,400;0,500;0,600;1,400&family=Inter:wght@400;500&display=swap');
+
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    background: ${C.bg};
+    color: ${C.text};
+    font-family: 'Inter', sans-serif;
+    font-size: 14px;
+    line-height: 1.5;
+    min-height: 100vh;
+  }
+
+  .app { max-width: 960px; margin: 0 auto; padding: 24px 16px 80px; }
+
+  /* Header */
+  .header { display: flex; align-items: baseline; gap: 16px; margin-bottom: 32px; border-bottom: 1px solid ${C.border}; padding-bottom: 16px; }
+  .header-title { font-family: 'Cormorant Garamond', serif; font-size: 26px; font-weight: 500; letter-spacing: 0.01em; color: ${C.text}; }
+  .header-sub { color: ${C.muted}; font-size: 13px; }
+
+  /* Nav */
+  .nav { display: flex; gap: 4px; margin-bottom: 28px; flex-wrap: wrap; }
+  .nav-btn { background: none; border: 1px solid ${C.border}; color: ${C.muted}; padding: 6px 14px; border-radius: 4px; cursor: pointer; font-size: 13px; font-family: inherit; transition: all .15s; }
+  .nav-btn:hover { border-color: ${C.accentDim}; color: ${C.text}; }
+  .nav-btn.active { border-color: ${C.accent}; color: ${C.accent}; background: rgba(200,151,58,.08); }
+
+  /* Cards / panels */
+  .panel { background: ${C.surface}; border: 1px solid ${C.border}; border-radius: 6px; padding: 20px; margin-bottom: 16px; }
+  .panel-title { font-family: 'Cormorant Garamond', serif; font-size: 18px; font-weight: 500; margin-bottom: 16px; color: ${C.text}; }
+
+  /* Forms */
+  .field { margin-bottom: 14px; }
+  .field label { display: block; font-size: 12px; color: ${C.muted}; margin-bottom: 4px; letter-spacing: 0.04em; text-transform: uppercase; }
+  .field input, .field select, .field textarea {
+    width: 100%; background: ${C.raised}; border: 1px solid ${C.border};
+    color: ${C.text}; padding: 8px 10px; border-radius: 4px;
+    font-family: inherit; font-size: 14px; outline: none;
+    transition: border-color .15s;
+  }
+  .field input:focus, .field select:focus, .field textarea:focus { border-color: ${C.accentDim}; }
+  .field select option { background: ${C.raised}; }
+
+  .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  .grid-3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 12px; }
+
+  /* Buttons */
+  .btn { display: inline-flex; align-items: center; gap: 6px; padding: 8px 16px; border-radius: 4px; border: none; cursor: pointer; font-family: inherit; font-size: 13px; font-weight: 500; transition: all .15s; }
+  .btn-primary { background: ${C.accent}; color: #13120F; }
+  .btn-primary:hover { background: #d9a84a; }
+  .btn-ghost { background: none; border: 1px solid ${C.border}; color: ${C.muted}; }
+  .btn-ghost:hover { border-color: ${C.accentDim}; color: ${C.text}; }
+  .btn-danger { background: none; border: 1px solid ${C.danger}; color: ${C.danger}; }
+  .btn-danger:hover { background: rgba(184,80,80,.1); }
+  .btn-sm { padding: 4px 10px; font-size: 12px; }
+  .btn-success { background: ${C.success}; color: #fff; }
+  .btn-success:hover { background: #6ab580; }
+
+  /* Tables */
+  .table-wrap { overflow-x: auto; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th { text-align: left; font-size: 11px; color: ${C.muted}; text-transform: uppercase; letter-spacing: 0.05em; padding: 8px 10px; border-bottom: 1px solid ${C.border}; font-weight: 500; }
+  td { padding: 9px 10px; border-bottom: 1px solid ${C.border}; color: ${C.text}; }
+  tr:last-child td { border-bottom: none; }
+  tr:hover td { background: rgba(255,255,255,.02); }
+
+  /* Status badges */
+  .badge { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 11px; font-weight: 500; }
+  .badge-sent { background: rgba(200,151,58,.15); color: ${C.accent}; }
+  .badge-paid { background: rgba(90,158,111,.15); color: ${C.success}; }
+  .badge-overdue { background: rgba(184,80,80,.15); color: ${C.danger}; }
+  .badge-draft { background: rgba(122,117,104,.15); color: ${C.muted}; }
+
+  /* Invoice preview */
+  .invoice-preview {
+    background: #faf8f3; color: #1a1a18;
+    border-radius: 6px; padding: 32px 36px;
+    font-family: 'Inter', sans-serif; font-size: 13px;
+    line-height: 1.7; margin-top: 20px;
+  }
+  .inv-header { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 28px; }
+  .inv-from { font-size: 12px; color: #555; }
+  .inv-from strong { font-size: 15px; color: #1a1a18; font-family: 'Cormorant Garamond', serif; font-weight: 600; }
+  .inv-label { font-family: 'Cormorant Garamond', serif; font-size: 28px; font-weight: 400; letter-spacing: 0.08em; color: #1a1a18; }
+  .inv-meta { font-size: 12px; color: #555; text-align: right; }
+  .inv-meta strong { color: #1a1a18; }
+  .inv-divider { border: none; border-top: 1px solid #d8d4cc; margin: 16px 0; }
+  .inv-bill { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; margin-bottom: 24px; }
+  .inv-bill-label { font-size: 10px; text-transform: uppercase; letter-spacing: 0.06em; color: #888; margin-bottom: 4px; }
+  .inv-bill-val { font-size: 13px; color: #1a1a18; }
+  .inv-line-hdr { display: grid; grid-template-columns: 1fr 60px 80px 80px; gap: 8px; font-size: 10px; text-transform: uppercase; letter-spacing: 0.05em; color: #888; padding: 6px 0; border-bottom: 1px solid #d8d4cc; }
+  .inv-line { display: grid; grid-template-columns: 1fr 60px 80px 80px; gap: 8px; padding: 10px 0; border-bottom: 1px solid #ebe8e0; }
+  .inv-total { display: flex; justify-content: flex-end; gap: 24px; padding: 12px 0; font-weight: 500; font-size: 14px; }
+  .inv-payment { margin-top: 24px; font-size: 12px; color: #555; background: #f0ece3; padding: 14px 16px; border-radius: 4px; }
+  .inv-payment strong { color: #1a1a18; display: block; margin-bottom: 6px; }
+
+  /* Summary stats */
+  .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px; margin-bottom: 20px; }
+  .stat { background: ${C.surface}; border: 1px solid ${C.border}; border-radius: 6px; padding: 14px 16px; }
+  .stat-val { font-family: 'Cormorant Garamond', serif; font-size: 24px; font-weight: 500; color: ${C.accent}; }
+  .stat-label { font-size: 11px; color: ${C.muted}; margin-top: 2px; text-transform: uppercase; letter-spacing: 0.04em; }
+
+  /* Section label */
+  .section-label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; color: ${C.muted}; margin-bottom: 10px; }
+
+  /* Tabs within page */
+  .tabs { display: flex; gap: 0; margin-bottom: 20px; border-bottom: 1px solid ${C.border}; }
+  .tab { background: none; border: none; padding: 8px 16px; color: ${C.muted}; cursor: pointer; font-family: inherit; font-size: 13px; border-bottom: 2px solid transparent; margin-bottom: -1px; transition: all .15s; }
+  .tab.active { color: ${C.accent}; border-bottom-color: ${C.accent}; }
+  .tab:hover { color: ${C.text}; }
+
+  /* Misc */
+  .row { display: flex; gap: 10px; align-items: center; }
+  .spacer { flex: 1; }
+  .text-muted { color: ${C.muted}; }
+  .text-accent { color: ${C.accent}; }
+  .text-success { color: ${C.success}; }
+  .text-danger { color: ${C.danger}; }
+  .mt-8 { margin-top: 8px; }
+  .mt-16 { margin-top: 16px; }
+  .empty { text-align: center; padding: 40px 20px; color: ${C.muted}; font-size: 13px; }
+`;
+
+// ── Main App ──────────────────────────────────────────────────────────────────
+function App() {
+  const [user, setUser] = useState(null);
+  const [authReady, setAuthReady] = useState(false);
+  const [tab, setTab] = useState("dashboard");
+  const [roster, setRoster] = useState([]);
+  const [invoices, setInvoices] = useState([]);
+  const [expenses, setExpenses] = useState([]);
+  const [otherIncome, setOtherIncome] = useState([]);
+  const [nextInv, setNextInv] = useState(1);
+  const [settings, setSettings] = useState({
+    name: "",
+    business: "James Lind Guitar",
+    email: "",
+    phone: "",
+    accountName: "",
+    sortCode: "XX-XX-XX",
+    accountNo: "XXXXXXXX",
+    schoolRate: 45,
+  });
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    if (!user) return;
+    (async () => {
+      await loadAll(user.uid);
+      const r = load(KEYS.roster, []);
+      const i = load(KEYS.invoices, []);
+      const e = load(KEYS.expenses, []);
+      const oi = load(KEYS.income, []);
+      const n = load(KEYS.nextInv, 1);
+      const s = load(KEYS.settings, null);
+      const seededRoster = r.length > 0 ? r : [
+        { id: 1,  type: "school", firstName: "Arin",      surname: "Dass",            yearGroup: "Y1", guardianName: "Dr Ramesh Dass",             email: "rndass@cantab.net",                 address1: "", city: "", notes: "" },
+        { id: 2,  type: "school", firstName: "Rishi",     surname: "Badiani",         yearGroup: "Y1", guardianName: "Ms Arti Badiani",             email: "artibadiani1@gmail.com",            address1: "", city: "", notes: "" },
+        { id: 3,  type: "school", firstName: "Cassandra", surname: "Ochieng",         yearGroup: "Y1", guardianName: "Miss Alice Greenidge",         email: "alicegreenidge@btinternet.com",     address1: "", city: "", notes: "" },
+        { id: 4,  type: "school", firstName: "Seb",       surname: "Kwok",            yearGroup: "Y3", guardianName: "Mrs Marina Kwok",              email: "marina.tsui@btinternet.com",        address1: "", city: "", notes: "" },
+        { id: 5,  type: "school", firstName: "Esther",    surname: "Singer",          yearGroup: "Y3", guardianName: "Mrs Elizabeth Singer",         email: "elizabeth_singer@outlook.com",      address1: "", city: "", notes: "" },
+        { id: 6,  type: "school", firstName: "Seth",      surname: "Khaki",           yearGroup: "Y3", guardianName: "Mrs Sabira Datoo",             email: "sdatoo@hotmail.com",                address1: "", city: "", notes: "" },
+        { id: 7,  type: "school", firstName: "Arjun",     surname: "Dhanjal",         yearGroup: "Y3", guardianName: "Mrs Payal Dhanjal",            email: "p-patel@hotmail.co.uk",             address1: "", city: "", notes: "" },
+        { id: 8,  type: "school", firstName: "Xavier",    surname: "Wilwaraarachchi", yearGroup: "Y3", guardianName: "Mrs Prisila Wilwaraarachchi",  email: "priscilavanessa@hotmail.co.uk",     address1: "", city: "", notes: "" },
+        { id: 9,  type: "school", firstName: "Aiden",     surname: "Vora",            yearGroup: "Y3", guardianName: "Mrs Kinu Vora",                email: "kinuandjay@gmail.com",              address1: "", city: "", notes: "" },
+        { id: 10, type: "school", firstName: "Aarya",     surname: "Kotecha",         yearGroup: "Y5", guardianName: "Mrs Roshni Kotecha",           email: "roshnikotecha0205@gmail.com",       address1: "", city: "", notes: "" },
+        { id: 11, type: "school", firstName: "Joshua",    surname: "Finn",            yearGroup: "Y5", guardianName: "Ms Lara Pechard",              email: "head@stmargarets-school.org.uk",    address1: "", city: "", notes: "" },
+        { id: 12, type: "school", firstName: "Praveer",   surname: "Dass",            yearGroup: "Y4", guardianName: "Dr Ramesh Dass",               email: "rndass@cantab.net",                 address1: "", city: "", notes: "" },
+        { id: 13, type: "school", firstName: "Aaron",     surname: "Pearce",          yearGroup: "",   guardianName: "Ms Judith Pearce",             email: "pearce.judith@yahoo.com",           address1: "", city: "", notes: "" },
+        { id: 14, type: "school", firstName: "John",      surname: "Zhao",            yearGroup: "",   guardianName: "Mr Liang Zhao",                email: "zhaoliang2023@gmail.com",           address1: "", city: "", notes: "" },
+        { id: 15, type: "school", firstName: "Harrison",  surname: "McNee",           yearGroup: "",   guardianName: "Mr Peter McNee",               email: "petermcnee@hotmail.com",            address1: "", city: "", notes: "" },
+        { id: 16, type: "school", firstName: "Solomia",   surname: "Sklyaryk",        yearGroup: "",   guardianName: "Ms Nataliya Sklyaryk",         email: "nataliya_uk@hotmail.co.uk",         address1: "", city: "", notes: "" },
+        { id: 17, type: "school", firstName: "Kush",      surname: "Thakrar",         yearGroup: "",   guardianName: "Ronak Thakrar",                email: "rthakrar@hotmail.com",              address1: "", city: "", notes: "" },
+        { id: 18, type: "school", firstName: "Arianna",   surname: "Galani-Evans",    yearGroup: "",   guardianName: "Mrs Sital Galani",             email: "sitalgalani@hotmail.com",           address1: "", city: "", notes: "" },
+        { id: 19, type: "school", firstName: "Myla",      surname: "Winters",         yearGroup: "",   guardianName: "Mr William Winters",           email: "william.winters@hotmail.com",       address1: "", city: "", notes: "" },
+        { id: 20, type: "school", firstName: "Avi",       surname: "Dhanjal",         yearGroup: "",   guardianName: "Mrs Anu Dhanjal",              email: "anu_365@hotmail.com",               address1: "", city: "", notes: "" },
+        { id: 21, type: "school", firstName: "Benjamin",  surname: "Wilkins",         yearGroup: "",   guardianName: "Mrs Surianna Wilkins",         email: "seanandsurianna@hotmail.com",       address1: "", city: "", notes: "" },
+        { id: 22, type: "school", firstName: "Philip",    surname: "Soteri",          yearGroup: "",   guardianName: "Mrs Katerina Soteri",          email: "katerinasoteri@yahoo.co.uk",        address1: "", city: "", notes: "" },
+        // Private students
+        { id: 23, type: "private", firstName: "Colin Stanbridge",  email: "colistan@aol.com",                  address1: "31 Marlborough Crescent", city: "", rate: 60,  duration: "60 min", payment: "Cash",    notes: "" },
+        { id: 24, type: "private", firstName: "Lucas Picquero",    email: "lucas.piquero@yahoo.co.uk",         address1: "", city: "", rate: 30,  duration: "30 min", payment: "Invoice", notes: "" },
+        { id: 25, type: "private", firstName: "Bill Byrne",        email: "bill.r.byrne@gmail.com",            address1: "", city: "", rate: 45,  duration: "45 min", payment: "Invoice", notes: "" },
+        { id: 26, type: "private", firstName: "Cameron",           email: "dagnidschwede@gmail.com",           address1: "", city: "", rate: 30,  duration: "30 min", payment: "Invoice", notes: "" },
+        { id: 27, type: "private", firstName: "Christabel Revell", email: "christabelrevell@gmail.com",        address1: "", city: "", rate: 30,  duration: "30 min", payment: "Invoice", notes: "" },
+        { id: 28, type: "private", firstName: "Ian Saville",       email: "iansavill81@hotmail.com",           address1: "", city: "", rate: 60,  duration: "60 min", payment: "Invoice", notes: "" },
+        { id: 29, type: "private", firstName: "Gil Seymour",       email: "whatsgildoing@gmail.com",           address1: "", city: "", rate: 65,  duration: "60 min", payment: "Invoice", notes: "" },
+        { id: 30, type: "private", firstName: "Safa Chowdhry",     email: "hemachowdhury@yahoo.co.uk",         address1: "", city: "", rate: 30,  duration: "30 min", payment: "Invoice", notes: "" },
+        { id: 31, type: "private", firstName: "Aksel Eliassen",    email: "grete_eliassen@yahoo.se",           address1: "", city: "", rate: 35,  duration: "30 min", payment: "Invoice", notes: "" },
+        { id: 32, type: "private", firstName: "Joseph Murphy",     email: "josephmaximmurphy@hotmail.com",     address1: "", city: "", rate: 30,  duration: "30 min", payment: "Invoice", notes: "" },
+      ];
+      if (r.length === 0) await save(KEYS.roster, seededRoster);
+      setRoster(seededRoster);
+      setInvoices(i);
+      setExpenses(e);
+      setOtherIncome(oi);
+      setNextInv(n);
+      if (s) setSettings(s);
+      setLoading(false);
+    })();
+  }, [user]);
+
+  useEffect(() => {
+    const unsub = window.fbOnAuthStateChanged(window.fbAuth, (u) => {
+      setUser(u); setAuthReady(true); if (!u) setLoading(false);
+    });
+    return () => unsub();
+  }, []);
+
+  const persistRoster = useCallback(async (v) => { setRoster(v); await save(KEYS.roster, v); }, []);
+  const persistInvoices = useCallback(async (v) => { setInvoices(v); await save(KEYS.invoices, v); }, []);
+  const persistExpenses = useCallback(async (v) => { setExpenses(v); await save(KEYS.expenses, v); }, []);
+  const persistOtherIncome = useCallback(async (v) => { setOtherIncome(v); await save(KEYS.income, v); }, []);
+  const persistNextInv = useCallback(async (v) => { setNextInv(v); await save(KEYS.nextInv, v); }, []);
+  const persistSettings = useCallback(async (v) => { setSettings(v); await save(KEYS.settings, v); }, []);
+
+  if (!authReady) return (<><style>{css}</style><div className="app"><div className="empty">Loading…</div></div></>);
+  if (!user) return (<><style>{css}</style><LoginScreen /></>);
+  if (loading) return (<><style>{css}</style><div className="app"><div className="empty">Loading your data…</div></div></>);
+
+  const props = { roster, invoices, expenses, otherIncome, nextInv, settings, persistRoster, persistInvoices, persistExpenses, persistOtherIncome, persistNextInv, persistSettings };
+
+  return (
+    <>
+      <style>{css}</style>
+      <div className="app">
+        <div className="header">
+          <span className="header-title">James Lind Guitar</span>
+          <span className="header-sub">Tuition management</span>
+          <span style={{flex:1}} />
+          <button className="btn btn-ghost btn-sm" onClick={() => window.fbSignOut(window.fbAuth)}>Sign out</button>
+        </div>
+        <nav className="nav">
+          {[["dashboard","Dashboard"],["roster","Roster"],["invoice","New Invoice"],["log","Invoice Log"],["expenses","Income & Expenses"],["settings","Settings"]].map(([k,l]) => (
+            <button key={k} className={`nav-btn${tab===k?" active":""}`} onClick={() => setTab(k)}>{l}</button>
+          ))}
+        </nav>
+        {tab === "dashboard" && <Dashboard {...props} setTab={setTab} />}
+        {tab === "roster" && <Roster {...props} />}
+        {tab === "invoice" && <NewInvoice {...props} />}
+        {tab === "log" && <InvoiceLog {...props} />}
+        {tab === "expenses" && <ExpensesPage {...props} />}
+        {tab === "settings" && <Settings {...props} />}
+      </div>
+    </>
+  );
+}
+
+// ── Dashboard ─────────────────────────────────────────────────────────────────
+function Dashboard({ invoices, expenses, otherIncome, roster, setTab }) {
+  const invoiceIncome = invoices.filter(i => i.status === "paid").reduce((a, i) => a + i.amount, 0);
+  const extraIncome = otherIncome.reduce((a, i) => a + i.amount, 0);
+  const totalIncome = invoiceIncome + extraIncome;
+  const outstanding = invoices.filter(i => i.status === "sent").reduce((a, i) => a + i.amount, 0);
+  const totalExp = expenses.reduce((a, e) => a + e.amount, 0);
+  const overdue = invoices.filter(i => i.status === "sent" && i.due < today());
+  const recent = [...invoices].sort((a,b) => b.date.localeCompare(a.date)).slice(0, 5);
+
+  const streams = [
+    ["School teaching", invoices.filter(i => i.status === "paid" && i.type === "school").reduce((a,i) => a+i.amount, 0)],
+    ["Private teaching", invoices.filter(i => i.status === "paid" && i.type === "private").reduce((a,i) => a+i.amount, 0)],
+    ["Performances", invoices.filter(i => i.status === "paid" && i.type === "performance").reduce((a,i) => a+i.amount, 0) + otherIncome.filter(i => i.source === "Performance").reduce((a,i) => a+i.amount, 0)],
+    ["Substack", otherIncome.filter(i => i.source === "Substack").reduce((a,i) => a+i.amount, 0)],
+    ["Other", otherIncome.filter(i => i.source === "Other").reduce((a,i) => a+i.amount, 0)],
+  ];
+
+  return (
+    <>
+      <div className="stats">
+        <div className="stat"><div className="stat-val">{fmtGBP(totalIncome)}</div><div className="stat-label">Income received</div></div>
+        <div className="stat"><div className="stat-val">{fmtGBP(outstanding)}</div><div className="stat-label">Outstanding</div></div>
+        <div className="stat"><div className="stat-val">{fmtGBP(totalIncome - totalExp)}</div><div className="stat-label">Net profit</div></div>
+        <div className="stat"><div className="stat-val">{roster.length}</div><div className="stat-label">Students on roster</div></div>
+      </div>
+
+      {overdue.length > 0 && (
+        <div className="panel" style={{borderColor: C.danger}}>
+          <div className="panel-title text-danger">Overdue invoices</div>
+          {overdue.map(inv => (
+            <div key={inv.id} className="row mt-8">
+              <span>{inv.number}</span>
+              <span className="text-muted">— {inv.clientName}</span>
+              <span className="spacer" />
+              <span className="text-danger">{fmtGBP(inv.amount)}</span>
+              <span className="text-muted" style={{fontSize:12}}>due {fmtDate(inv.due)}</span>
+            </div>
+          ))}
+        </div>
+      )}
+
+      <div className="panel">
+        <div className="panel-title">Income by stream</div>
+        {streams.map(([label, val]) => (
+          <div key={label} className="row" style={{padding:"6px 0", borderBottom:`1px solid ${C.border}`}}>
+            <span className="text-muted" style={{fontSize:13}}>{label}</span>
+            <span className="spacer" />
+            <span style={{fontFamily:"'Cormorant Garamond', serif", fontSize:16}} className={val > 0 ? "" : "text-muted"}>{val > 0 ? fmtGBP(val) : "—"}</span>
+          </div>
+        ))}
+      </div>
+
+      <div className="panel">
+        <div className="row">
+          <div className="panel-title" style={{marginBottom:0}}>Recent invoices</div>
+          <div className="spacer" />
+          <button className="btn btn-ghost btn-sm" onClick={() => setTab("log")}>View all</button>
+        </div>
+        <div className="mt-16">
+          {recent.length === 0 ? <div className="empty">No invoices yet — create your first one.</div> : (
+            <div className="table-wrap">
+              <table>
+                <thead><tr><th>Invoice</th><th>Client</th><th>Date</th><th>Amount</th><th>Status</th></tr></thead>
+                <tbody>
+                  {recent.map(inv => (
+                    <tr key={inv.id}>
+                      <td className="text-accent">{inv.number}</td>
+                      <td>{inv.clientName}</td>
+                      <td className="text-muted">{fmtDate(inv.date)}</td>
+                      <td>{fmtGBP(inv.amount)}</td>
+                      <td><StatusBadge status={inv.status} /></td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      </div>
+    </>
+  );
+}
+
+// ── Roster ────────────────────────────────────────────────────────────────────
+function Roster({ roster, persistRoster }) {
+  const [subTab, setSubTab] = useState("school");
+  const [form, setForm] = useState(null);
+
+  const blank = (type) => ({
+    id: Date.now(), type,
+    firstName: "", surname: "", yearGroup: "", guardianName: "",
+    email: "", organisation: "", address1: "", address2: "", city: "", postcode: "",
+    rate: "", duration: "30 min", payment: "", notes: ""
+  });
+
+  const schoolStudents = roster.filter(s => s.type === "school");
+  const privateStudents = roster.filter(s => s.type === "private");
+  const performanceContacts = roster.filter(s => s.type === "performance");
+  const substackContacts = roster.filter(s => s.type === "substack");
+
+  const lists = { school: schoolStudents, private: privateStudents, performance: performanceContacts, substack: substackContacts };
+
+  function save(student) {
+    const exists = roster.find(r => r.id === student.id);
+    const updated = exists ? roster.map(r => r.id === student.id ? student : r) : [...roster, student];
+    persistRoster(updated);
+    setForm(null);
+  }
+
+  function del(id) {
+    persistRoster(roster.filter(r => r.id !== id));
+  }
+
+  return (
+    <>
+      <div className="tabs">
+        <button className={`tab${subTab==="school"?" active":""}`} onClick={() => setSubTab("school")}>St Margaret's ({schoolStudents.length})</button>
+        <button className={`tab${subTab==="private"?" active":""}`} onClick={() => setSubTab("private")}>Private ({privateStudents.length})</button>
+        <button className={`tab${subTab==="performance"?" active":""}`} onClick={() => setSubTab("performance")}>Performances ({performanceContacts.length})</button>
+        <button className={`tab${subTab==="substack"?" active":""}`} onClick={() => setSubTab("substack")}>Substack ({substackContacts.length})</button>
+      </div>
+
+      {form ? (
+        <StudentForm student={form} onSave={save} onCancel={() => setForm(null)} />
+      ) : (
+        <>
+          <div className="row" style={{marginBottom:16}}>
+            <div className="spacer" />
+            <button className="btn btn-primary" onClick={() => setForm(blank(subTab))}>+ Add {subTab === "school" || subTab === "private" ? "student" : subTab === "performance" ? "client / venue" : "contact"}</button>
+          </div>
+          <StudentTable
+            students={lists[subTab]}
+            type={subTab}
+            onEdit={setForm}
+            onDelete={del}
+          />
+        </>
+      )}
+    </>
+  );
+}
+
+function StudentTable({ students, type, onEdit, onDelete }) {
+  if (students.length === 0) return <div className="empty">Nothing added here yet.</div>;
+  const isContact = type === "performance" || type === "substack";
+  return (
+    <div className="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Name</th>
+            {type === "school" && <th>Year</th>}
+            {isContact && <th>Organisation</th>}
+            <th>Email</th>
+            {type === "private" && <th>Rate</th>}
+            {type === "performance" && <th>Typical fee</th>}
+            <th>Notes</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody>
+          {students.map(s => (
+            <tr key={s.id}>
+              <td>{type === "school" ? `${s.firstName} ${s.surname}` : s.firstName}</td>
+              {type === "school" && <td className="text-muted">{s.yearGroup}</td>}
+              {isContact && <td className="text-muted">{s.organisation || "—"}</td>}
+              <td className="text-muted">{s.email || "—"}</td>
+              {type === "private" && <td>{s.rate ? fmtGBP(s.rate) : "—"}</td>}
+              {type === "performance" && <td>{s.rate ? fmtGBP(s.rate) : "—"}</td>}
+              <td className="text-muted" style={{maxWidth:180, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap"}}>{s.notes || "—"}</td>
+              <td>
+                <div className="row">
+                  <button className="btn btn-ghost btn-sm" onClick={() => onEdit(s)}>Edit</button>
+                  <button className="btn btn-danger btn-sm" onClick={() => onDelete(s.id)}>Remove</button>
+                </div>
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function StudentForm({ student, onSave, onCancel }) {
+  const [s, setS] = useState(student);
+  const f = (k) => (e) => setS({...s, [k]: e.target.value});
+  const isSchool = s.type === "school";
+  const isContact = s.type === "performance" || s.type === "substack";
+
+  return (
+    <div className="panel">
+      <div className="panel-title">{student.firstName ? "Edit" : "Add"} {s.type === "performance" ? "client / venue" : isContact ? "contact" : "student"}</div>
+      {isSchool && (
+        <>
+          <div className="grid-3">
+            <div className="field"><label>First name</label><input value={s.firstName} onChange={f("firstName")} /></div>
+            <div className="field"><label>Surname</label><input value={s.surname} onChange={f("surname")} /></div>
+            <div className="field"><label>Year group</label><input value={s.yearGroup} onChange={f("yearGroup")} placeholder="e.g. Y7" /></div>
+          </div>
+          <div className="grid-2">
+            <div className="field"><label>Parent / guardian name</label><input value={s.guardianName} onChange={f("guardianName")} /></div>
+            <div className="field"><label>Parent email</label><input value={s.email} onChange={f("email")} type="email" /></div>
+          </div>
+        </>
+      )}
+      {s.type === "private" && (
+        <>
+          <div className="grid-2">
+            <div className="field"><label>Student / contact name</label><input value={s.firstName} onChange={f("firstName")} /></div>
+            <div className="field"><label>Email</label><input value={s.email} onChange={f("email")} type="email" /></div>
+          </div>
+          <div className="grid-3">
+            <div className="field"><label>Rate per lesson (£)</label><input value={s.rate} onChange={f("rate")} type="number" /></div>
+            <div className="field"><label>Duration</label>
+              <select value={s.duration} onChange={f("duration")}>
+                <option>30 min</option><option>45 min</option><option>60 min</option>
+              </select>
+            </div>
+            <div className="field"><label>Payment method</label>
+              <select value={s.payment} onChange={f("payment")}>
+                <option value="">—</option>
+                <option>Direct debit</option><option>Bank transfer</option><option>Cash</option>
+              </select>
+            </div>
+          </div>
+        </>
+      )}
+      {isContact && (
+        <>
+          <div className="grid-2">
+            <div className="field"><label>{s.type === "performance" ? "Contact / venue name" : "Contact name"}</label><input value={s.firstName} onChange={f("firstName")} placeholder={s.type === "performance" ? "e.g. venue, concert organiser, fixer" : "e.g. editor, collaborator"} /></div>
+            <div className="field"><label>Organisation</label><input value={s.organisation} onChange={f("organisation")} placeholder={s.type === "performance" ? "e.g. concert society, venue, Live Music Now" : "e.g. publication, Substack"} /></div>
+          </div>
+          <div className="grid-2">
+            <div className="field"><label>Email</label><input value={s.email} onChange={f("email")} type="email" /></div>
+            {s.type === "performance" && (
+              <div className="field"><label>Typical fee (£)</label><input value={s.rate} onChange={f("rate")} type="number" /></div>
+            )}
+          </div>
+        </>
+      )}
+      {!isContact && (
+        <div className="grid-2">
+          <div className="field"><label>Address line 1</label><input value={s.address1} onChange={f("address1")} /></div>
+          <div className="field"><label>Town / city</label><input value={s.city} onChange={f("city")} /></div>
+        </div>
+      )}
+      <div className="field"><label>Notes</label><input value={s.notes} onChange={f("notes")} /></div>
+      <div className="row mt-16">
+        <button className="btn btn-primary" onClick={() => onSave(s)}>Save</button>
+        <button className="btn btn-ghost" onClick={onCancel}>Cancel</button>
+      </div>
+    </div>
+  );
+}
+
+// ── New Invoice ───────────────────────────────────────────────────────────────
+function NewInvoice({ roster, invoices, nextInv, settings, persistInvoices, persistNextInv }) {
+  const [invType, setInvType] = useState("school");
+  const [studentId, setStudentId] = useState("");
+  const [qty, setQty] = useState(10);
+  const [term, setTerm] = useState("Autumn 2025");
+  const [invDate, setInvDate] = useState(today());
+  const [preview, setPreview] = useState(null);
+  const [sent, setSent] = useState(false);
+
+  const students = roster.filter(s => s.type === invType);
+  const student = students.find(s => s.id === Number(studentId));
+  const [customRate, setCustomRate] = useState("");
+  const baseRate = invType === "school" ? settings.schoolRate : (student?.rate || 0);
+  const rate = invType === "performance" && customRate !== "" ? Number(customRate) : baseRate;
+  const amount = qty * rate;
+  const number = nextInvNum(nextInv);
+
+  function buildInvoice() {
+    const clientName = invType === "school"
+      ? (student.guardianName || `${student.firstName} ${student.surname}`)
+      : invType === "performance"
+        ? (student.organisation || student.firstName)
+        : student.firstName;
+    const clientEmail = student.email || "";
+    const description = invType === "school"
+      ? `Guitar tuition — ${student.firstName} ${student.surname}, ${term}`
+      : invType === "performance"
+        ? `Performance fee — ${student.organisation || student.firstName}`
+        : `Guitar tuition — ${student.firstName}`;
+
+    return {
+      id: Date.now(),
+      number,
+      type: invType,
+      clientName,
+      clientEmail,
+      studentName: invType === "school" ? `${student.firstName} ${student.surname}` : student.firstName,
+      description,
+      qty: Number(qty),
+      rate: Number(rate),
+      amount: Number(amount),
+      date: invDate,
+      due: dueDate(invDate),
+      term: invType === "school" ? term : "",
+      status: "draft",
+    };
+  }
+
+  function handlePreview() {
+    if (!student) return;
+    setPreview(buildInvoice());
+    setSent(false);
+  }
+
+  async function handleSendEmail() {
+    const inv = preview || buildInvoice();
+    const body = buildInvoiceText(inv, settings);
+    const subject = `${inv.number} — Guitar tuition — ${inv.clientName}`;
+    const mailto = `mailto:${inv.clientEmail}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
+    window.open(mailto, "_blank");
+
+    // Save to log with status "sent"
+    const saved = { ...inv, status: "sent" };
+    const updated = [...invoices, saved];
+    await persistInvoices(updated);
+    await persistNextInv(nextInv + 1);
+    setSent(true);
+    setPreview(saved);
+  }
+
+  return (
+    <>
+      <div className="panel">
+        <div className="panel-title">Create invoice</div>
+
+        <div className="tabs" style={{marginBottom:16}}>
+          <button className={`tab${invType==="school"?" active":""}`} onClick={() => { setInvType("school"); setStudentId(""); setQty(10); setCustomRate(""); }}>School</button>
+          <button className={`tab${invType==="private"?" active":""}`} onClick={() => { setInvType("private"); setStudentId(""); setQty(1); setCustomRate(""); }}>Private</button>
+          <button className={`tab${invType==="performance"?" active":""}`} onClick={() => { setInvType("performance"); setStudentId(""); setQty(1); setCustomRate(""); }}>Performance</button>
+        </div>
+
+        <div className="grid-2">
+          <div className="field">
+            <label>{invType === "performance" ? "Client / venue" : "Student"}</label>
+            <select value={studentId} onChange={e => { setStudentId(e.target.value); setCustomRate(""); }}>
+              <option value="">— select —</option>
+              {students.map(s => (
+                <option key={s.id} value={s.id}>
+                  {invType === "school" ? `${s.firstName} ${s.surname}` : invType === "performance" ? (s.organisation || s.firstName) : s.firstName}
+                </option>
+              ))}
+            </select>
+          </div>
+          <div className="field"><label>Invoice date</label><input type="date" value={invDate} onChange={e => setInvDate(e.target.value)} /></div>
+        </div>
+
+        <div className="grid-3">
+          <div className="field">
+            <label>{invType === "performance" ? "Engagements (qty)" : "Lessons (qty)"}</label>
+            <input type="number" value={qty} onChange={e => setQty(e.target.value)} min={1} />
+          </div>
+          <div className="field">
+            <label>{invType === "performance" ? "Fee (£) — editable" : "Rate (£)"}</label>
+            {invType === "performance" ? (
+              <input type="number" value={customRate !== "" ? customRate : baseRate} onChange={e => setCustomRate(e.target.value)} />
+            ) : (
+              <input type="number" value={rate} readOnly style={{opacity:.7}} />
+            )}
+          </div>
+          {invType === "school" && (
+            <div className="field">
+              <label>Term</label>
+              <select value={term} onChange={e => setTerm(e.target.value)}>
+                {["Autumn 2024","Spring 2025","Summer 2025","Autumn 2025","Spring 2026","Summer 2026","Autumn 2026"].map(t => <option key={t}>{t}</option>)}
+              </select>
+            </div>
+          )}
+        </div>
+
+        {student && (
+          <div className="row" style={{marginTop:8, padding:"10px 12px", background: C.raised, borderRadius:4}}>
+            <span className="text-muted" style={{fontSize:12}}>Invoice {number}</span>
+            <span className="spacer" />
+            <span style={{fontFamily:"'Cormorant Garamond', serif", fontSize:18}}>{fmtGBP(amount)}</span>
+          </div>
+        )}
+
+        <div className="row mt-16">
+          <button className="btn btn-primary" onClick={handlePreview} disabled={!student}>Preview invoice</button>
+        </div>
+      </div>
+
+      {preview && (
+        <div>
+          <InvoicePreview inv={preview} settings={settings} />
+          <div className="row mt-16">
+            {!sent ? (
+              <button className="btn btn-success" onClick={handleSendEmail}>
+                Open in Mail — {preview.clientEmail || "no email on file"}
+              </button>
+            ) : (
+              <span className="text-success">✓ Saved to invoice log as Sent</span>
+            )}
+            <button className="btn btn-ghost" onClick={async () => {
+              downloadInvoice(preview, settings);
+              if (!sent) {
+                const saved = { ...preview, status: "sent" };
+                await persistInvoices([...invoices, saved]);
+                await persistNextInv(nextInv + 1);
+                setSent(true);
+                setPreview(saved);
+              }
+            }}>
+              Download PDF
+            </button>
+          </div>
+        </div>
+      )}
+    </>
+  );
+}
+
+function InvoicePreview({ inv, settings }) {
+  return (
+    <div className="invoice-preview">
+      <div className="inv-header">
+        <div className="inv-from">
+          <strong>{settings.business}</strong><br />
+          {settings.email}<br />
+          {settings.phone}
+        </div>
+        <div style={{textAlign:"right"}}>
+          <div className="inv-label">INVOICE</div>
+          <div className="inv-meta">
+            <strong>{inv.number}</strong><br />
+            {fmtDate(inv.date)}<br />
+            <span style={{color:"#888"}}>Due {fmtDate(inv.due)}</span>
+          </div>
+        </div>
+      </div>
+
+      <hr className="inv-divider" />
+
+      <div className="inv-bill">
+        <div>
+          <div className="inv-bill-label">Bill to</div>
+          <div className="inv-bill-val">{inv.clientName}<br /><span style={{color:"#888",fontSize:12}}>{inv.clientEmail}</span></div>
+        </div>
+        {inv.term && (
+          <div>
+            <div className="inv-bill-label">Term</div>
+            <div className="inv-bill-val">{inv.term}</div>
+          </div>
+        )}
+      </div>
+
+      <div className="inv-line-hdr">
+        <span>Description</span><span>Qty</span><span style={{textAlign:"right"}}>Rate</span><span style={{textAlign:"right"}}>Amount</span>
+      </div>
+      <div className="inv-line">
+        <span>{inv.description}</span>
+        <span>{inv.qty}</span>
+        <span style={{textAlign:"right"}}>{fmtGBP(inv.rate)}</span>
+        <span style={{textAlign:"right"}}>{fmtGBP(inv.amount)}</span>
+      </div>
+
+      <div className="inv-total">
+        <span style={{color:"#888"}}>Total due</span>
+        <span>{fmtGBP(inv.amount)}</span>
+      </div>
+
+      <div className="inv-payment">
+        <strong>Payment details</strong>
+        Account name: {settings.accountName} &nbsp;·&nbsp;
+        Sort code: {settings.sortCode} &nbsp;·&nbsp;
+        Account no: {settings.accountNo}<br />
+        Reference: {inv.number} — {inv.clientName}
+      </div>
+    </div>
+  );
+}
+
+// ── Invoice Log ───────────────────────────────────────────────────────────────
+function InvoiceLog({ invoices, persistInvoices }) {
+  const sorted = [...invoices].filter(i => !i.manual).sort((a, b) => b.date.localeCompare(a.date));
+
+  async function markPaid(id) {
+    const updated = invoices.map(i => i.id === id ? { ...i, status: "paid", paidDate: today() } : i);
+    await persistInvoices(updated);
+  }
+
+  async function del(id) {
+    await persistInvoices(invoices.filter(i => i.id !== id));
+  }
+
+  if (sorted.length === 0) return <div className="empty">No invoices yet.</div>;
+
+  return (
+    <div className="table-wrap">
+      <table>
+        <thead>
+          <tr><th>No.</th><th>Client</th><th>Type</th><th>Date</th><th>Due</th><th>Amount</th><th>Status</th><th></th></tr>
+        </thead>
+        <tbody>
+          {sorted.map(inv => (
+            <tr key={inv.id}>
+              <td className="text-accent">{inv.number}</td>
+              <td>{inv.clientName}</td>
+              <td className="text-muted" style={{textTransform:"capitalize"}}>{inv.type}</td>
+              <td className="text-muted">{fmtDate(inv.date)}</td>
+              <td className={inv.status === "sent" && inv.due < today() ? "text-danger" : "text-muted"}>{fmtDate(inv.due)}</td>
+              <td>{fmtGBP(inv.amount)}</td>
+              <td><StatusBadge status={inv.status === "sent" && inv.due < today() ? "overdue" : inv.status} /></td>
+              <td>
+                <div className="row">
+                  {inv.status !== "paid" && (
+                    <button className="btn btn-success btn-sm" onClick={() => markPaid(inv.id)}>Mark paid</button>
+                  )}
+                  <button className="btn btn-danger btn-sm" onClick={() => del(inv.id)}>×</button>
+                </div>
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+// ── Expenses ──────────────────────────────────────────────────────────────────
+function ExpensesPage({ expenses, invoices, otherIncome, roster, persistExpenses, persistOtherIncome, persistInvoices }) {
+  const [subTab, setSubTab] = useState("payments");
+  const [form, setForm] = useState({ date: today(), description: "", category: "Strings & consumables", supplier: "", amount: "", receipt: false, notes: "" });
+  const [incForm, setIncForm] = useState({ date: today(), source: "Performance", description: "", payer: "", amount: "", notes: "" });
+  const [payForm, setPayForm] = useState({ date: today(), type: "school", studentId: "", clientName: "", amount: "", notes: "" });
+
+  const CATS = ["Strings & consumables","Sheet music / scores","Equipment","Travel","Professional development","Software / subscriptions","Marketing","Insurance","Other"];
+  const SOURCES = ["Performance","Substack","Other"];
+
+  // Manually-logged payments are stored as invoices with status "paid" and a manual flag,
+  // so they flow through every total identically to invoiced-then-paid income.
+  const payStudents = roster.filter(s => s.type === payForm.type);
+
+  async function addPayment() {
+    if (!payForm.amount || (!payForm.studentId && !payForm.clientName)) return;
+    const student = roster.find(s => s.id === Number(payForm.studentId));
+    const name = student
+      ? (payForm.type === "school" ? `${student.firstName} ${student.surname}` : (student.organisation || student.firstName))
+      : payForm.clientName;
+    const rec = {
+      id: Date.now(),
+      number: "—",
+      type: payForm.type,
+      clientName: name,
+      clientEmail: student?.email || "",
+      studentName: name,
+      description: payForm.notes || `${payForm.type.charAt(0).toUpperCase() + payForm.type.slice(1)} payment — ${name}`,
+      qty: 1,
+      rate: Number(payForm.amount),
+      amount: Number(payForm.amount),
+      date: payForm.date,
+      due: payForm.date,
+      term: "",
+      status: "paid",
+      paidDate: payForm.date,
+      manual: true,
+    };
+    await persistInvoices([...invoices, rec]);
+    setPayForm({ date: today(), type: payForm.type, studentId: "", clientName: "", amount: "", notes: "" });
+  }
+
+  async function delPayment(id) {
+    await persistInvoices(invoices.filter(i => i.id !== id));
+  }
+
+
+  async function addExpense() {
+    if (!form.description || !form.amount) return;
+    const updated = [...expenses, { ...form, id: Date.now(), amount: Number(form.amount) }];
+    await persistExpenses(updated);
+    setForm({ date: today(), description: "", category: "Strings & consumables", supplier: "", amount: "", receipt: false, notes: "" });
+  }
+
+  async function delExpense(id) {
+    await persistExpenses(expenses.filter(e => e.id !== id));
+  }
+
+  async function addIncome() {
+    if (!incForm.description || !incForm.amount) return;
+    const updated = [...otherIncome, { ...incForm, id: Date.now(), amount: Number(incForm.amount) }];
+    await persistOtherIncome(updated);
+    setIncForm({ date: today(), source: "Performance", description: "", payer: "", amount: "", notes: "" });
+  }
+
+  async function delIncome(id) {
+    await persistOtherIncome(otherIncome.filter(e => e.id !== id));
+  }
+
+  const invoiceIncome = invoices.filter(i => i.status === "paid").reduce((a, i) => a + i.amount, 0);
+  const extraIncome = otherIncome.reduce((a, i) => a + i.amount, 0);
+  const totalIncome = invoiceIncome + extraIncome;
+  const totalExp = expenses.reduce((a, e) => a + e.amount, 0);
+
+  // Tax year runs 6 April – 5 April. Months ordered Apr → Mar.
+  const taxMonths = [
+    { label: "Apr", m: "04", yOff: 0 }, { label: "May", m: "05", yOff: 0 }, { label: "Jun", m: "06", yOff: 0 },
+    { label: "Jul", m: "07", yOff: 0 }, { label: "Aug", m: "08", yOff: 0 }, { label: "Sep", m: "09", yOff: 0 },
+    { label: "Oct", m: "10", yOff: 0 }, { label: "Nov", m: "11", yOff: 0 }, { label: "Dec", m: "12", yOff: 0 },
+    { label: "Jan", m: "01", yOff: 1 }, { label: "Feb", m: "02", yOff: 1 }, { label: "Mar", m: "03", yOff: 1 },
+  ];
+  const [taxYearStart, setTaxYearStart] = useState(2025); // 2025 means 2025/26
+  const taxYears = [2023, 2024, 2025, 2026];
+
+  // All paid income (invoiced + manually logged) plus other income, within a tax year
+  function inTaxYear(dateStr, startYear) {
+    if (!dateStr) return false;
+    const d = new Date(dateStr);
+    const start = new Date(`${startYear}-04-06`);
+    const end = new Date(`${startYear + 1}-04-05T23:59:59`);
+    return d >= start && d <= end;
+  }
+
+  const tyInvoiceIncome = invoices.filter(i => i.status === "paid" && inTaxYear(i.date, taxYearStart)).reduce((a,i) => a+i.amount, 0);
+  const tyOtherIncome = otherIncome.filter(i => inTaxYear(i.date, taxYearStart)).reduce((a,i) => a+i.amount, 0);
+  const tyIncome = tyInvoiceIncome + tyOtherIncome;
+  const tyExpenses = expenses.filter(e => inTaxYear(e.date, taxYearStart)).reduce((a,e) => a+e.amount, 0);
+
+  // Income by stream within the tax year (for self-assessment categorisation)
+  const tyStreams = [
+    ["School teaching", invoices.filter(i => i.status === "paid" && i.type === "school" && inTaxYear(i.date, taxYearStart)).reduce((a,i)=>a+i.amount,0)],
+    ["Private teaching", invoices.filter(i => i.status === "paid" && i.type === "private" && inTaxYear(i.date, taxYearStart)).reduce((a,i)=>a+i.amount,0)],
+    ["Performances", invoices.filter(i => i.status === "paid" && i.type === "performance" && inTaxYear(i.date, taxYearStart)).reduce((a,i)=>a+i.amount,0) + otherIncome.filter(i => i.source === "Performance" && inTaxYear(i.date, taxYearStart)).reduce((a,i)=>a+i.amount,0)],
+    ["Substack", otherIncome.filter(i => i.source === "Substack" && inTaxYear(i.date, taxYearStart)).reduce((a,i)=>a+i.amount,0)],
+    ["Other", otherIncome.filter(i => i.source === "Other" && inTaxYear(i.date, taxYearStart)).reduce((a,i)=>a+i.amount,0)],
+  ];
+
+  return (
+    <>
+      <div className="tabs">
+        <button className={`tab${subTab==="payments"?" active":""}`} onClick={() => setSubTab("payments")}>Log Payment</button>
+        <button className={`tab${subTab==="income"?" active":""}`} onClick={() => setSubTab("income")}>Other Income</button>
+        <button className={`tab${subTab==="expenses"?" active":""}`} onClick={() => setSubTab("expenses")}>Expenses</button>
+        <button className={`tab${subTab==="summary"?" active":""}`} onClick={() => setSubTab("summary")}>Summary</button>
+      </div>
+
+      {subTab === "payments" && (
+        <>
+          <div className="panel">
+            <div className="panel-title">Log a received payment</div>
+            <p className="text-muted" style={{fontSize:13, marginBottom:16}}>Record money already received — including from earlier in the tax year — without issuing an invoice. These flow into your totals and tax-year summary exactly like paid invoices.</p>
+            <div className="grid-3">
+              <div className="field"><label>Date received</label><input type="date" value={payForm.date} onChange={e => setPayForm({...payForm, date:e.target.value})} /></div>
+              <div className="field"><label>Stream</label>
+                <select value={payForm.type} onChange={e => setPayForm({...payForm, type:e.target.value, studentId:"", clientName:""})}>
+                  <option value="school">School</option>
+                  <option value="private">Private</option>
+                  <option value="performance">Performance</option>
+                </select>
+              </div>
+              <div className="field"><label>Amount (£)</label><input type="number" value={payForm.amount} onChange={e => setPayForm({...payForm, amount:e.target.value})} /></div>
+            </div>
+            <div className="grid-2">
+              <div className="field"><label>Student / client from roster</label>
+                <select value={payForm.studentId} onChange={e => setPayForm({...payForm, studentId:e.target.value, clientName:""})}>
+                  <option value="">— select or use free text below —</option>
+                  {payStudents.map(s => (
+                    <option key={s.id} value={s.id}>{payForm.type === "school" ? `${s.firstName} ${s.surname}` : (s.organisation || s.firstName)}</option>
+                  ))}
+                </select>
+              </div>
+              <div className="field"><label>Or one-off name</label><input value={payForm.clientName} onChange={e => setPayForm({...payForm, clientName:e.target.value, studentId:""})} placeholder="e.g. former student, ad-hoc gig" /></div>
+            </div>
+            <div className="field"><label>Note (optional)</label><input value={payForm.notes} onChange={e => setPayForm({...payForm, notes:e.target.value})} placeholder="e.g. Spring term 2025, paid by cash" /></div>
+            <button className="btn btn-primary" onClick={addPayment}>Log payment</button>
+          </div>
+
+          <div className="table-wrap">
+            {invoices.filter(i => i.manual).length === 0 ? <div className="empty">No manually-logged payments yet.</div> : (
+              <table>
+                <thead><tr><th>Date</th><th>Stream</th><th>From</th><th>Amount</th><th>Note</th><th></th></tr></thead>
+                <tbody>
+                  {[...invoices].filter(i => i.manual).sort((a,b) => b.date.localeCompare(a.date)).map(p => (
+                    <tr key={p.id}>
+                      <td className="text-muted">{fmtDate(p.date)}</td>
+                      <td className="text-muted" style={{textTransform:"capitalize"}}>{p.type}</td>
+                      <td>{p.clientName}</td>
+                      <td className="text-success">{fmtGBP(p.amount)}</td>
+                      <td className="text-muted" style={{maxWidth:200, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap"}}>{p.description}</td>
+                      <td><button className="btn btn-danger btn-sm" onClick={() => delPayment(p.id)}>×</button></td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+          </div>
+        </>
+      )}
+
+      {subTab === "income" && (
+        <>
+          <div className="panel">
+            <div className="panel-title">Add income — performances, Substack, other</div>
+            <div className="grid-3">
+              <div className="field"><label>Date</label><input type="date" value={incForm.date} onChange={e => setIncForm({...incForm, date:e.target.value})} /></div>
+              <div className="field"><label>Source</label>
+                <select value={incForm.source} onChange={e => setIncForm({...incForm, source:e.target.value})}>
+                  {SOURCES.map(s => <option key={s}>{s}</option>)}
+                </select>
+              </div>
+              <div className="field"><label>Amount (£)</label><input type="number" value={incForm.amount} onChange={e => setIncForm({...incForm, amount:e.target.value})} /></div>
+            </div>
+            <div className="grid-2">
+              <div className="field"><label>Description</label><input value={incForm.description} onChange={e => setIncForm({...incForm, description:e.target.value})} placeholder="e.g. Live Music Now concert, March payout" /></div>
+              <div className="field"><label>Payer / venue</label><input value={incForm.payer} onChange={e => setIncForm({...incForm, payer:e.target.value})} placeholder="e.g. Concert society, Substack" /></div>
+            </div>
+            <button className="btn btn-primary" onClick={addIncome}>Add income</button>
+          </div>
+
+          <div className="table-wrap">
+            {otherIncome.length === 0 ? <div className="empty">No performance or Substack income recorded yet.</div> : (
+              <table>
+                <thead><tr><th>Date</th><th>Source</th><th>Description</th><th>Payer</th><th>Amount</th><th></th></tr></thead>
+                <tbody>
+                  {[...otherIncome].sort((a,b) => b.date.localeCompare(a.date)).map(e => (
+                    <tr key={e.id}>
+                      <td className="text-muted">{fmtDate(e.date)}</td>
+                      <td><span className="badge badge-sent">{e.source}</span></td>
+                      <td>{e.description}</td>
+                      <td className="text-muted">{e.payer || "—"}</td>
+                      <td className="text-success">{fmtGBP(e.amount)}</td>
+                      <td><button className="btn btn-danger btn-sm" onClick={() => delIncome(e.id)}>×</button></td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+          </div>
+        </>
+      )}
+
+      {subTab === "expenses" && (
+        <>
+          <div className="panel">
+            <div className="panel-title">Add expense</div>
+            <div className="grid-3">
+              <div className="field"><label>Date</label><input type="date" value={form.date} onChange={e => setForm({...form, date:e.target.value})} /></div>
+              <div className="field"><label>Description</label><input value={form.description} onChange={e => setForm({...form, description:e.target.value})} /></div>
+              <div className="field"><label>Category</label>
+                <select value={form.category} onChange={e => setForm({...form, category:e.target.value})}>
+                  {CATS.map(c => <option key={c}>{c}</option>)}
+                </select>
+              </div>
+            </div>
+            <div className="grid-3">
+              <div className="field"><label>Supplier</label><input value={form.supplier} onChange={e => setForm({...form, supplier:e.target.value})} /></div>
+              <div className="field"><label>Amount (£)</label><input type="number" value={form.amount} onChange={e => setForm({...form, amount:e.target.value})} /></div>
+              <div className="field"><label>Notes</label><input value={form.notes} onChange={e => setForm({...form, notes:e.target.value})} /></div>
+            </div>
+            <button className="btn btn-primary" onClick={addExpense}>Add expense</button>
+          </div>
+
+          <div className="table-wrap">
+            {expenses.length === 0 ? <div className="empty">No expenses recorded yet.</div> : (
+              <table>
+                <thead><tr><th>Date</th><th>Description</th><th>Category</th><th>Supplier</th><th>Amount</th><th></th></tr></thead>
+                <tbody>
+                  {[...expenses].sort((a,b) => b.date.localeCompare(a.date)).map(e => (
+                    <tr key={e.id}>
+                      <td className="text-muted">{fmtDate(e.date)}</td>
+                      <td>{e.description}</td>
+                      <td className="text-muted">{e.category}</td>
+                      <td className="text-muted">{e.supplier || "—"}</td>
+                      <td>{fmtGBP(e.amount)}</td>
+                      <td><button className="btn btn-danger btn-sm" onClick={() => delExpense(e.id)}>×</button></td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+          </div>
+        </>
+      )}
+
+      {subTab === "summary" && (
+        <>
+          <div className="row" style={{marginBottom:16}}>
+            <div className="field" style={{maxWidth:220, marginBottom:0}}>
+              <label>Tax year</label>
+              <select value={taxYearStart} onChange={e => setTaxYearStart(Number(e.target.value))}>
+                {taxYears.map(y => <option key={y} value={y}>6 Apr {y} – 5 Apr {y+1}  ({y}/{String(y+1).slice(2)})</option>)}
+              </select>
+            </div>
+          </div>
+
+          <div className="stats">
+            <div className="stat"><div className="stat-val">{fmtGBP(tyIncome)}</div><div className="stat-label">Income this tax year</div></div>
+            <div className="stat"><div className="stat-val">{fmtGBP(tyExpenses)}</div><div className="stat-label">Expenses this tax year</div></div>
+            <div className="stat"><div className="stat-val">{fmtGBP(tyIncome - tyExpenses)}</div><div className="stat-label">Net profit (taxable)</div></div>
+          </div>
+
+          <div className="panel">
+            <div className="panel-title">Income by stream — {taxYearStart}/{String(taxYearStart+1).slice(2)}</div>
+            <p className="text-muted" style={{fontSize:12, marginBottom:12}}>This is your gross self-employment income for the year. Check whether your St Margaret's work is paid via PAYE — if so, it sits outside self-employment income for tax purposes.</p>
+            {tyStreams.map(([label, val]) => (
+              <div key={label} className="row" style={{padding:"6px 0", borderBottom:`1px solid ${C.border}`}}>
+                <span className="text-muted" style={{fontSize:13}}>{label}</span>
+                <span className="spacer" />
+                <span style={{fontFamily:"'Cormorant Garamond', serif", fontSize:16}} className={val > 0 ? "" : "text-muted"}>{val > 0 ? fmtGBP(val) : "—"}</span>
+              </div>
+            ))}
+            <div className="row" style={{padding:"10px 0 0", fontWeight:500}}>
+              <span style={{fontSize:13}}>Gross income</span>
+              <span className="spacer" />
+              <span style={{fontFamily:"'Cormorant Garamond', serif", fontSize:18}} className="text-accent">{fmtGBP(tyIncome)}</span>
+            </div>
+          </div>
+
+          <div className="panel">
+            <div className="panel-title">Monthly breakdown — {taxYearStart}/{String(taxYearStart+1).slice(2)}</div>
+            <div className="table-wrap">
+              <table>
+                <thead><tr><th>Month</th><th>Income</th><th>Expenses</th><th>Net</th></tr></thead>
+                <tbody>
+                  {taxMonths.map(({label, m, yOff}) => {
+                    const y = taxYearStart + yOff;
+                    const prefix = `${y}-${m}`;
+                    const inc = invoices.filter(i => i.status === "paid" && i.date.startsWith(prefix)).reduce((a,i) => a+i.amount, 0)
+                      + otherIncome.filter(i => i.date.startsWith(prefix)).reduce((a,i) => a+i.amount, 0);
+                    const exp = expenses.filter(e => e.date.startsWith(prefix)).reduce((a,e) => a+e.amount, 0);
+                    const net = inc - exp;
+                    return (
+                      <tr key={label}>
+                        <td>{label} {y}</td>
+                        <td className="text-success">{inc > 0 ? fmtGBP(inc) : <span className="text-muted">—</span>}</td>
+                        <td className="text-danger">{exp > 0 ? fmtGBP(exp) : <span className="text-muted">—</span>}</td>
+                        <td className={net > 0 ? "text-success" : net < 0 ? "text-danger" : "text-muted"}>{net !== 0 ? fmtGBP(net) : "—"}</td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          <div className="panel">
+            <div className="panel-title">Expenses by category — {taxYearStart}/{String(taxYearStart+1).slice(2)}</div>
+            <div className="table-wrap">
+              <table>
+                <thead><tr><th>Category</th><th>Total</th></tr></thead>
+                <tbody>
+                  {CATS.map(cat => {
+                    const total = expenses.filter(e => e.category === cat && inTaxYear(e.date, taxYearStart)).reduce((a,e) => a+e.amount, 0);
+                    if (total === 0) return null;
+                    return (
+                      <tr key={cat}>
+                        <td className="text-muted">{cat}</td>
+                        <td className="text-danger">{fmtGBP(total)}</td>
+                      </tr>
+                    );
+                  })}
+                  {expenses.filter(e => inTaxYear(e.date, taxYearStart)).length === 0 && (
+                    <tr><td colSpan={2} className="text-muted" style={{textAlign:"center", padding:"20px"}}>No expenses recorded for this tax year.</td></tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </>
+      )}
+
+    </>
+  );
+}
+
+// ── Export ───────────────────────────────────────────────────────────────────
+function exportData(roster, invoices, expenses, otherIncome, settings) {
+  const data = {
+    exportDate: new Date().toISOString(),
+    settings,
+    roster,
+    invoices,
+    expenses,
+    otherIncome,
+  };
+  const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `jlguitar-backup-${new Date().toISOString().slice(0,10)}.json`;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+function importData(file, persistRoster, persistInvoices, persistExpenses, persistOtherIncome, persistSettings, persistNextInv, setMsg) {
+  const reader = new FileReader();
+  reader.onload = async (e) => {
+    try {
+      const data = JSON.parse(e.target.result);
+      if (data.roster) await persistRoster(data.roster);
+      if (data.invoices) await persistInvoices(data.invoices);
+      if (data.expenses) await persistExpenses(data.expenses);
+      if (data.otherIncome) await persistOtherIncome(data.otherIncome);
+      if (data.settings) await persistSettings(data.settings);
+      if (data.invoices && data.invoices.length > 0) {
+        const maxInv = data.invoices.reduce((max, inv) => {
+          const n = parseInt(inv.number.replace('INV-', ''));
+          return n > max ? n : max;
+        }, 0);
+        await persistNextInv(maxInv + 1);
+      }
+      setMsg('✓ Data restored successfully');
+    } catch {
+      setMsg('Import failed — file may be corrupted');
+    }
+  };
+  reader.readAsText(file);
+}
+
+// ── Settings ──────────────────────────────────────────────────────────────────
+function Settings({ settings, persistSettings, roster, invoices, expenses, otherIncome, persistRoster, persistInvoices, persistExpenses, persistOtherIncome, persistNextInv }) {
+  const [s, setS] = useState(settings);
+  const [msg, setMsg] = useState("");
+  const f = k => e => setS({...s, [k]: e.target.value});
+
+  return (
+    <>
+    <div className="panel">
+      <div className="panel-title">Your details</div>
+      <div className="grid-2">
+        <div className="field"><label>Full name</label><input value={s.name} onChange={f("name")} /></div>
+        <div className="field"><label>Business name</label><input value={s.business} onChange={f("business")} /></div>
+        <div className="field"><label>Email</label><input value={s.email} onChange={f("email")} /></div>
+        <div className="field"><label>Phone</label><input value={s.phone} onChange={f("phone")} /></div>
+      </div>
+      <div className="panel-title" style={{marginTop:20}}>Bank details</div>
+      <div className="grid-3">
+        <div className="field"><label>Account name</label><input value={s.accountName} onChange={f("accountName")} /></div>
+        <div className="field"><label>Sort code</label><input value={s.sortCode} onChange={f("sortCode")} placeholder="XX-XX-XX" /></div>
+        <div className="field"><label>Account number</label><input value={s.accountNo} onChange={f("accountNo")} /></div>
+      </div>
+      <div className="panel-title" style={{marginTop:20}}>Rates</div>
+      <div className="field" style={{maxWidth:200}}>
+        <label>St Margaret's rate per lesson (£)</label>
+        <input type="number" value={s.schoolRate} onChange={f("schoolRate")} />
+      </div>
+      <button className="btn btn-primary mt-16" onClick={() => persistSettings(s)}>Save settings</button>
+    </div>
+    <div className="panel" style={{marginTop:0}}>
+      <div className="panel-title">Data backup</div>
+      <p className="text-muted" style={{fontSize:13, marginBottom:16}}>Export a backup of all your data — roster, invoices, expenses, and settings — as a JSON file saved to your device. Import it here to restore.</p>
+      <div className="row">
+        <button className="btn btn-primary" onClick={() => exportData(roster, invoices, expenses, otherIncome, settings)}>Export backup</button>
+        <label className="btn btn-ghost" style={{cursor:"pointer"}}>
+          Import backup
+          <input type="file" accept=".json" style={{display:"none"}} onChange={e => { if (e.target.files[0]) importData(e.target.files[0], persistRoster, persistInvoices, persistExpenses, persistOtherIncome, persistSettings, persistNextInv, setMsg); }} />
+        </label>
+      </div>
+      {msg && <p className="text-success mt-8" style={{fontSize:13}}>{msg}</p>}
+    </div>
+    </>
+  );
+}
+
+// ── Status badge ──────────────────────────────────────────────────────────────
+function StatusBadge({ status }) {
+  const map = { draft:"badge-draft", sent:"badge-sent", paid:"badge-paid", overdue:"badge-overdue" };
+  return <span className={`badge ${map[status] || "badge-draft"}`}>{status}</span>;
+}
+
+
+function LoginScreen() {
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [err, setErr] = useState("");
+  const [busy, setBusy] = useState(false);
+  async function signIn() {
+    setErr(""); setBusy(true);
+    try { await window.fbSignIn(window.fbAuth, email.trim(), password); }
+    catch (e) { setErr("Sign-in failed. Check your email and password."); setBusy(false); }
+  }
+  return (
+    <div className="app" style={{maxWidth:380, paddingTop:80}}>
+      <div className="header" style={{justifyContent:"center", borderBottom:"none"}}>
+        <span className="header-title">James Lind Guitar</span>
+      </div>
+      <div className="panel">
+        <div className="panel-title">Sign in</div>
+        <div className="field"><label>Email</label><input type="email" value={email} onChange={e => setEmail(e.target.value)} onKeyDown={e => e.key==="Enter" && signIn()} /></div>
+        <div className="field"><label>Password</label><input type="password" value={password} onChange={e => setPassword(e.target.value)} onKeyDown={e => e.key==="Enter" && signIn()} /></div>
+        {err && <p className="text-danger" style={{fontSize:13, marginBottom:12}}>{err}</p>}
+        <button className="btn btn-primary" onClick={signIn} disabled={busy}>{busy ? "Signing in…" : "Sign in"}</button>
+      </div>
+    </div>
+  );
+}
+
+    function mount() {
+      const root = ReactDOM.createRoot(document.getElementById('root'));
+      root.render(<App />);
+    }
+    (function waitForDeps(attempt) {
+      if (window.fbAuth && window.fbDb && window.React && window.ReactDOM) { mount(); }
+      else if (attempt < 150) { setTimeout(() => waitForDeps(attempt + 1), 50); }
+      else {
+        var missing = [];
+        if (!window.React || !window.ReactDOM) missing.push("React");
+        if (!window.fbAuth || !window.fbDb) missing.push("Firebase");
+        document.getElementById('root').innerHTML =
+          '<div style="font-family:sans-serif;padding:40px;color:#b85050">Could not load: ' + missing.join(", ") + '. Check your connection and refresh the page.</div>';
+      }
+    })(0);
+  </script>
+</body>
+</html>
